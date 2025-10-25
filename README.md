@@ -41,7 +41,7 @@ Red Hat Image Builder shares AMI
 
 ```hcl
 module "ami_copier" {
-  source = "git::https://github.com/PodioSpaz/ami-copier.git?ref=v1.0.0"
+  source = "git::https://github.com/PodioSpaz/ami-copier.git?ref=v0.1.0"
 
   name_prefix        = "rhel"
   ami_name_template  = "rhel-9-encrypted-{date}"
@@ -54,7 +54,7 @@ module "ami_copier" {
 }
 ```
 
-**Note:** Pin to a specific version tag (e.g., `v1.0.0`) for production use.
+**Note:** Pin to a specific version tag (e.g., `v0.1.0`) for production use.
 
 ## Usage
 
@@ -308,13 +308,13 @@ Always pin to a specific version in production:
 ```hcl
 # Pin to a specific version (recommended)
 module "ami_copier" {
-  source = "git::https://github.com/PodioSpaz/ami-copier.git?ref=v1.0.0"
+  source = "git::https://github.com/PodioSpaz/ami-copier.git?ref=v0.1.0"
   # ...
 }
 
 # Pin to a minor version (automatically get patch updates)
 module "ami_copier" {
-  source = "git::https://github.com/PodioSpaz/ami-copier.git?ref=v1.0"
+  source = "git::https://github.com/PodioSpaz/ami-copier.git?ref=v0.1"
   # ...
 }
 
@@ -338,9 +338,9 @@ Releases are fully automated:
 4. The CHANGELOG is automatically updated
 
 **Commit message → Version bump:**
-- `feat:` → Minor version (1.0.0 → 1.1.0)
-- `fix:` → Patch version (1.0.0 → 1.0.1)
-- `feat!:` or `BREAKING CHANGE:` → Major version (1.0.0 → 2.0.0)
+- `feat:` → Minor version (0.1.0 → 0.2.0)
+- `fix:` → Patch version (0.1.0 → 0.1.1)
+- `feat!:` or `BREAKING CHANGE:` → Major version (0.1.0 → 1.0.0)
 - `docs:`, `chore:`, `ci:` → No release
 
 ## Inputs
