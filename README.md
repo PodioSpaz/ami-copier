@@ -41,7 +41,7 @@ Red Hat Image Builder shares AMI
 
 ```hcl
 module "ami_copier" {
-  source = "path/to/ami-copier"
+  source = "git::https://github.com/PodioSpaz/ami-copier.git?ref=v1.0.0"
 
   name_prefix        = "rhel"
   ami_name_template  = "rhel-9-encrypted-{date}"
@@ -53,6 +53,8 @@ module "ami_copier" {
   }
 }
 ```
+
+**Note:** Pin to a specific version tag (e.g., `v1.0.0`) for production use.
 
 ## Usage
 
@@ -294,6 +296,52 @@ The Lambda function requires these IAM permissions:
 - `ec2:CreateTags` - Tag the copied AMI
 - `ec2:DescribeSnapshots` - List snapshots
 - `logs:*` - CloudWatch Logs
+
+## Versioning
+
+This module follows [Semantic Versioning](https://semver.org/). Releases are automated using [Release Please](https://github.com/googleapis/release-please).
+
+### Referencing Specific Versions
+
+Always pin to a specific version in production:
+
+```hcl
+# Pin to a specific version (recommended)
+module "ami_copier" {
+  source = "git::https://github.com/PodioSpaz/ami-copier.git?ref=v1.0.0"
+  # ...
+}
+
+# Pin to a minor version (automatically get patch updates)
+module "ami_copier" {
+  source = "git::https://github.com/PodioSpaz/ami-copier.git?ref=v1.0"
+  # ...
+}
+
+# Use latest (not recommended for production)
+module "ami_copier" {
+  source = "git::https://github.com/PodioSpaz/ami-copier.git"
+  # ...
+}
+```
+
+### Version History
+
+See [CHANGELOG.md](CHANGELOG.md) for a detailed history of changes.
+
+### Release Process
+
+Releases are fully automated:
+1. Commits following [Conventional Commits](https://www.conventionalcommits.org/) are pushed to `main`
+2. Release Please automatically creates/updates a release PR
+3. Merging the release PR creates a new GitHub release with a version tag
+4. The CHANGELOG is automatically updated
+
+**Commit message → Version bump:**
+- `feat:` → Minor version (1.0.0 → 1.1.0)
+- `fix:` → Patch version (1.0.0 → 1.0.1)
+- `feat!:` or `BREAKING CHANGE:` → Major version (1.0.0 → 2.0.0)
+- `docs:`, `chore:`, `ci:` → No release
 
 ## Inputs
 

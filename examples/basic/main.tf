@@ -14,8 +14,10 @@ provider "aws" {
 }
 
 # Basic usage - single RHEL version
+# When using this module from GitHub, pin to a specific version:
+# source = "git::https://github.com/PodioSpaz/ami-copier.git?ref=v1.0.0"
 module "ami_copier" {
-  source = "../.."
+  source = "../.."  # Local path for testing
 
   name_prefix       = "rhel"
   ami_name_template = "rhel-encrypted-gp3-{date}"
@@ -28,8 +30,10 @@ module "ami_copier" {
 }
 
 # Example: Separate modules for RHEL 9 and RHEL 10
+# Production usage - pin to same version for consistency:
+# source = "git::https://github.com/PodioSpaz/ami-copier.git?ref=v1.0.0"
 module "rhel9_copier" {
-  source = "../.."
+  source = "../.."  # Local path for testing
 
   name_prefix       = "rhel9"
   ami_name_template = "rhel-9-encrypted-{date}"
@@ -44,7 +48,7 @@ module "rhel9_copier" {
 }
 
 module "rhel10_copier" {
-  source = "../.."
+  source = "../.."  # Local path for testing
 
   name_prefix       = "rhel10"
   ami_name_template = "rhel-10-encrypted-{date}"
