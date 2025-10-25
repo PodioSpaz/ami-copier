@@ -59,15 +59,62 @@ variable "log_retention_days" {
 }
 
 variable "enable_redhat_api" {
-  description = "Enable Red Hat Image Builder API integration for enhanced tagging. Requires redhat_offline_token to be set."
+  description = "Enable Red Hat Image Builder API integration for enhanced tagging. Requires Red Hat Service Account credentials (redhat_client_id and redhat_client_secret) or legacy offline token."
   type        = bool
   default     = false
 }
 
+variable "redhat_credential_store" {
+  description = <<-EOT
+    Where to store Red Hat API credentials:
+    - 'ssm' (default): AWS Systems Manager Parameter Store (SecureString)
+    - 'secretsmanager': AWS Secrets Manager
+
+    SSM Parameter Store is recommended for most use cases (simpler, lower cost).
+  EOT
+  type        = string
+  default     = "ssm"
+
+  validation {
+    condition     = contains(["ssm", "secretsmanager"], var.redhat_credential_store)
+    error_message = "Must be 'ssm' or 'secretsmanager'."
+  }
+}
+
+variable "redhat_client_id" {
+  description = <<-EOT
+    Red Hat Service Account Client ID for API authentication.
+    Create a service account at https://console.redhat.com (Settings > Service Accounts).
+    Only required if enable_redhat_api is true.
+    Will be stored securely in SSM Parameter Store or Secrets Manager based on redhat_credential_store.
+  EOT
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
+variable "redhat_client_secret" {
+  description = <<-EOT
+    Red Hat Service Account Client Secret for API authentication.
+    Obtained when creating the service account (shown only once).
+    Only required if enable_redhat_api is true.
+    Will be stored securely in SSM Parameter Store or Secrets Manager based on redhat_credential_store.
+  EOT
+  type        = string
+  default     = ""
+  sensitive   = true
+}
+
 variable "redhat_offline_token" {
   description = <<-EOT
-    Red Hat offline token for API authentication. Get one from https://access.redhat.com/management/api.
-    Only required if enable_redhat_api is true. Will be stored securely in AWS Secrets Manager.
+    [DEPRECATED - Use redhat_client_id and redhat_client_secret instead]
+
+    Red Hat offline token for API authentication (legacy). Get one from https://access.redhat.com/management/api.
+    Only required if enable_redhat_api is true and using legacy authentication.
+    Will be stored securely in AWS Secrets Manager.
+
+    NOTE: Offline tokens are tied to user accounts. Service accounts (redhat_client_id/redhat_client_secret)
+    are recommended for automation as they provide better security and are not tied to individual users.
   EOT
   type        = string
   default     = ""

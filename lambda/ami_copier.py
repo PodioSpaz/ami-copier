@@ -16,6 +16,7 @@ logger.setLevel(logging.INFO)
 # Initialize AWS clients
 ec2_client = boto3.client('ec2')
 secretsmanager_client = boto3.client('secretsmanager')
+ssm_client = boto3.client('ssm')
 
 
 def get_block_device_mappings(source_ami_id: str) -> List[Dict[str, Any]]:
@@ -70,41 +71,101 @@ def get_block_device_mappings(source_ami_id: str) -> List[Dict[str, Any]]:
 
 def get_redhat_credentials() -> Optional[Dict[str, str]]:
     """
-    Retrieve Red Hat API credentials from AWS Secrets Manager.
+    Retrieve Red Hat API credentials from SSM Parameter Store or Secrets Manager.
 
     Returns:
-        Dictionary with 'offline_token' or None if not configured
+        Dictionary with 'client_id' and 'client_secret' (or legacy 'offline_token') or None if not configured
     """
-    secret_name = os.environ.get('REDHAT_SECRET_NAME')
-    if not secret_name:
-        logger.info("REDHAT_SECRET_NAME not set, skipping Image Builder API integration")
-        return None
+    credential_store = os.environ.get('REDHAT_CREDENTIAL_STORE', 'ssm')
 
     try:
-        response = secretsmanager_client.get_secret_value(SecretId=secret_name)
-        secret = json.loads(response['SecretString'])
-        return secret
+        if credential_store == 'ssm':
+            # Get credentials from SSM Parameter Store
+            client_id_param = os.environ.get('CLIENT_ID_PARAM')
+            client_secret_param = os.environ.get('CLIENT_SECRET_PARAM')
+
+            if not client_id_param or not client_secret_param:
+                logger.info("SSM parameter names not set, skipping Image Builder API integration")
+                return None
+
+            try:
+                client_id_response = ssm_client.get_parameter(
+                    Name=client_id_param,
+                    WithDecryption=True
+                )
+                client_secret_response = ssm_client.get_parameter(
+                    Name=client_secret_param,
+                    WithDecryption=True
+                )
+
+                return {
+                    'client_id': client_id_response['Parameter']['Value'],
+                    'client_secret': client_secret_response['Parameter']['Value']
+                }
+            except Exception as e:
+                logger.error(f"Failed to retrieve credentials from SSM Parameter Store: {e}")
+                return None
+
+        elif credential_store == 'secretsmanager':
+            # Get credentials from Secrets Manager
+            secret_name = os.environ.get('REDHAT_SECRET_NAME')
+            if not secret_name:
+                logger.info("REDHAT_SECRET_NAME not set, skipping Image Builder API integration")
+                return None
+
+            try:
+                response = secretsmanager_client.get_secret_value(SecretId=secret_name)
+                secret = json.loads(response['SecretString'])
+                return secret
+            except Exception as e:
+                logger.error(f"Failed to retrieve credentials from Secrets Manager: {e}")
+                return None
+        else:
+            logger.error(f"Unknown credential store type: {credential_store}")
+            return None
+
     except Exception as e:
         logger.error(f"Failed to retrieve Red Hat credentials: {e}")
         return None
 
 
-def exchange_offline_token(offline_token: str) -> Optional[str]:
+def get_access_token(credentials: Dict[str, str]) -> Optional[str]:
     """
-    Exchange Red Hat offline token for access token.
+    Get Red Hat API access token from credentials.
+
+    Supports both service account (client_id/client_secret) and legacy offline token authentication.
 
     Args:
-        offline_token: Red Hat offline token
+        credentials: Dictionary with either:
+                    - 'client_id' and 'client_secret' for service account auth, or
+                    - 'offline_token' for legacy user token auth
 
     Returns:
-        Access token or None if exchange fails
+        Access token or None if authentication fails
     """
     try:
-        data = parse.urlencode({
-            'grant_type': 'refresh_token',
-            'client_id': 'rhsm-api',
-            'refresh_token': offline_token
-        }).encode('utf-8')
+        # Service account authentication (preferred)
+        if 'client_id' in credentials and 'client_secret' in credentials:
+            logger.info("Using service account authentication")
+            data = parse.urlencode({
+                'grant_type': 'client_credentials',
+                'client_id': credentials['client_id'],
+                'client_secret': credentials['client_secret'],
+                'scope': 'api.console'
+            }).encode('utf-8')
+
+        # Legacy offline token authentication (backward compatibility)
+        elif 'offline_token' in credentials:
+            logger.info("Using offline token authentication (legacy)")
+            data = parse.urlencode({
+                'grant_type': 'refresh_token',
+                'client_id': 'rhsm-api',
+                'refresh_token': credentials['offline_token']
+            }).encode('utf-8')
+
+        else:
+            logger.error("Invalid credentials format: must contain either (client_id, client_secret) or offline_token")
+            return None
 
         req = request.Request(
             'https://sso.redhat.com/auth/realms/redhat-external/protocol/openid-connect/token',
@@ -114,10 +175,13 @@ def exchange_offline_token(offline_token: str) -> Optional[str]:
 
         with request.urlopen(req, timeout=10) as response:
             result = json.loads(response.read().decode('utf-8'))
-            return result.get('access_token')
+            access_token = result.get('access_token')
+            if access_token:
+                logger.info("Successfully obtained access token")
+            return access_token
 
     except (URLError, HTTPError) as e:
-        logger.error(f"Failed to exchange offline token: {e}")
+        logger.error(f"Failed to get access token: {e}")
         return None
 
 
@@ -387,9 +451,9 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
 
         # Try to enrich tags from Image Builder API
         credentials = get_redhat_credentials()
-        if credentials and credentials.get('offline_token'):
+        if credentials:
             logger.info("Attempting to retrieve metadata from Image Builder API")
-            access_token = exchange_offline_token(credentials['offline_token'])
+            access_token = get_access_token(credentials)
 
             if access_token:
                 compose_result = find_compose_by_ami(source_ami_id, access_token)

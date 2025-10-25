@@ -29,6 +29,14 @@ output "cloudwatch_log_group_name" {
 }
 
 output "redhat_api_secret_arn" {
-  description = "ARN of the Secrets Manager secret containing Red Hat API credentials (only set if enable_redhat_api is true)"
-  value       = var.enable_redhat_api ? aws_secretsmanager_secret.redhat_api[0].arn : null
+  description = "ARN of the Secrets Manager secret containing Red Hat API credentials (only set if enable_redhat_api is true and redhat_credential_store is 'secretsmanager')"
+  value       = var.enable_redhat_api && var.redhat_credential_store == "secretsmanager" ? aws_secretsmanager_secret.redhat_api[0].arn : null
+}
+
+output "redhat_ssm_parameter_arns" {
+  description = "ARNs of SSM Parameter Store parameters containing Red Hat API credentials (only set if enable_redhat_api is true and redhat_credential_store is 'ssm')"
+  value = var.enable_redhat_api && var.redhat_credential_store == "ssm" ? {
+    client_id     = aws_ssm_parameter.redhat_client_id[0].arn
+    client_secret = aws_ssm_parameter.redhat_client_secret[0].arn
+  } : null
 }

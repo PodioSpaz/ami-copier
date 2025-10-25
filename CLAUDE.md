@@ -90,10 +90,20 @@ All copied AMIs receive user-provided tags plus three automatic tags (`ami_copie
 
 When `enable_redhat_api = true`, the Lambda function queries the Red Hat Image Builder API to enrich AMI tags with metadata. This solves the problem of Red Hat AMIs having generic names like `composer-api-{uuid}` with no description.
 
-**Authentication Flow** (`ami_copier.py:71-121`):
-1. Retrieve Red Hat offline token from AWS Secrets Manager
-2. Exchange offline token for 15-minute access token via Red Hat SSO
+**Credential Storage Options**:
+- **SSM Parameter Store (default)**: Stores client_id and client_secret as SecureString parameters (`main.tf:23-43`)
+- **Secrets Manager (alternative)**: Stores credentials as JSON secret (`main.tf:46-65`)
+
+**Authentication Flow** (`ami_copier.py:72-185`):
+1. Retrieve Red Hat Service Account credentials from SSM Parameter Store or Secrets Manager
+2. Exchange credentials for 15-minute access token via Red Hat SSO using OAuth2 client_credentials grant
 3. Use access token for Image Builder API requests
+
+**Service Account vs Offline Token**:
+- **Service Account (recommended)**: Uses `client_id` and `client_secret`, not tied to user accounts, supports both SSM and Secrets Manager
+  - Requires service account to be added to a User Access group with the **RHEL viewer** role
+  - RHEL viewer role grants read-only access to RHEL Insights, including Image Builder API
+- **Offline Token (legacy)**: User-based authentication, expires after 30 days of inactivity, only supported via Secrets Manager for backward compatibility
 
 **Compose Lookup** (`ami_copier.py:124-174`):
 - Queries `GET /composes?limit=100` to get recent composes
@@ -111,15 +121,26 @@ Tags are enriched with:
 - `PackageCount` - Number of packages installed
 
 **Graceful Degradation**:
-- If Secrets Manager secret not configured, skips API integration
+- If credentials not configured, skips API integration
 - If access token exchange fails, falls back to basic tagging
 - If compose not found in API, uses basic tagging
 - AMI copy always proceeds regardless of API availability
 
-**Secrets Manager** (`main.tf:22-39`):
-- Created only when `enable_redhat_api = true`
-- Stores offline token as JSON: `{"offline_token": "..."}`
+**Credential Storage** (`main.tf:22-65`):
+
+*SSM Parameter Store (default)*:
+- Created when `enable_redhat_api = true` and `redhat_credential_store = "ssm"`
+- Stores two SecureString parameters: `/{name_prefix}/redhat/client-id` and `/{name_prefix}/redhat/client-secret`
+- Lambda IAM policy grants `ssm:GetParameter` permission on both parameters
+- Lower cost than Secrets Manager for simple credential storage
+
+*Secrets Manager (alternative)*:
+- Created when `enable_redhat_api = true` and `redhat_credential_store = "secretsmanager"`
+- Stores credentials as JSON:
+  - Service account: `{"client_id": "...", "client_secret": "..."}`
+  - Legacy offline token: `{"offline_token": "..."}`
 - Lambda IAM policy grants `secretsmanager:GetSecretValue` permission
+- Better for organizations already using Secrets Manager
 
 ## Module Usage Pattern
 
@@ -154,10 +175,34 @@ Each instance creates its own Lambda function and EventBridge rule. The `name_pr
 
 ### Red Hat API Integration Issues
 
-- **Token expired**: Offline tokens expire after 30 days of inactivity. Generate a new one and update Secrets Manager
+- **Service account authentication fails**:
+  - Verify service account has been added to a User Access group with the **RHEL viewer** role in Red Hat Console
+    - Navigate to console.redhat.com → Settings → User Access → Groups
+    - Ensure the service account's group has the "RHEL viewer" role assigned
+  - Check client_id and client_secret are correct in SSM/Secrets Manager
+  - Service account credentials don't expire (unlike offline tokens)
+  - Test API access manually: `curl -H "Authorization: Bearer $TOKEN" https://console.redhat.com/api/image-builder/v1/composes?limit=5`
+
+- **Offline token expired** (legacy):
+  - Offline tokens expire after 30 days of inactivity
+  - Generate a new one at https://access.redhat.com/management/api and update Secrets Manager
+  - Consider migrating to service account authentication
+
 - **Compose not found**: AMI might be older than 100 most recent composes, or from a different Red Hat account
+
 - **API timeout**: Increase `lambda_timeout` to 600 seconds when API integration is enabled
+
+- **Credential retrieval fails**:
+  - SSM: Check Lambda has `ssm:GetParameter` permission for both client_id and client_secret parameters
+  - Secrets Manager: Check Lambda has `secretsmanager:GetSecretValue` permission
+  - Verify credential store type matches what's configured (`REDHAT_CREDENTIAL_STORE` env var)
+
 - **Check API calls in logs**:
   ```bash
-  aws logs filter-pattern /aws/lambda/${name_prefix}-ami-copier --filter-pattern "Image Builder"
+  aws logs tail /aws/lambda/${name_prefix}-ami-copier --follow --filter-pattern "Image Builder"
+  ```
+
+- **Verify authentication method in use**:
+  ```bash
+  aws logs tail /aws/lambda/${name_prefix}-ami-copier --follow --filter-pattern "service account"
   ```

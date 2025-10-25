@@ -19,9 +19,32 @@ resource "aws_cloudwatch_log_group" "lambda" {
   tags = var.tags
 }
 
-# Secrets Manager Secret for Red Hat API credentials
+# SSM Parameter Store for Red Hat API credentials (default)
+resource "aws_ssm_parameter" "redhat_client_id" {
+  count = var.enable_redhat_api && var.redhat_credential_store == "ssm" ? 1 : 0
+
+  name        = "/${var.name_prefix}/redhat/client-id"
+  description = "Red Hat Service Account Client ID for Image Builder API"
+  type        = "SecureString"
+  value       = var.redhat_client_id
+
+  tags = var.tags
+}
+
+resource "aws_ssm_parameter" "redhat_client_secret" {
+  count = var.enable_redhat_api && var.redhat_credential_store == "ssm" ? 1 : 0
+
+  name        = "/${var.name_prefix}/redhat/client-secret"
+  description = "Red Hat Service Account Client Secret for Image Builder API"
+  type        = "SecureString"
+  value       = var.redhat_client_secret
+
+  tags = var.tags
+}
+
+# Secrets Manager Secret for Red Hat API credentials (alternative storage)
 resource "aws_secretsmanager_secret" "redhat_api" {
-  count = var.enable_redhat_api ? 1 : 0
+  count = var.enable_redhat_api && var.redhat_credential_store == "secretsmanager" ? 1 : 0
 
   name        = local.secret_name
   description = "Red Hat Image Builder API credentials for AMI metadata enrichment"
@@ -30,11 +53,14 @@ resource "aws_secretsmanager_secret" "redhat_api" {
 }
 
 resource "aws_secretsmanager_secret_version" "redhat_api" {
-  count = var.enable_redhat_api ? 1 : 0
+  count = var.enable_redhat_api && var.redhat_credential_store == "secretsmanager" ? 1 : 0
 
   secret_id = aws_secretsmanager_secret.redhat_api[0].id
-  secret_string = jsonencode({
+  secret_string = var.redhat_offline_token != "" ? jsonencode({
     offline_token = var.redhat_offline_token
+    }) : jsonencode({
+    client_id     = var.redhat_client_id
+    client_secret = var.redhat_client_secret
   })
 }
 
@@ -85,7 +111,20 @@ resource "aws_iam_role_policy" "lambda" {
         ]
         Resource = "*"
       }
-      ], var.enable_redhat_api ? [
+      ],
+      var.enable_redhat_api && var.redhat_credential_store == "ssm" ? [
+        {
+          Effect = "Allow"
+          Action = [
+            "ssm:GetParameter"
+          ]
+          Resource = [
+            aws_ssm_parameter.redhat_client_id[0].arn,
+            aws_ssm_parameter.redhat_client_secret[0].arn
+          ]
+        }
+      ] : [],
+      var.enable_redhat_api && var.redhat_credential_store == "secretsmanager" ? [
         {
           Effect = "Allow"
           Action = [
@@ -109,12 +148,22 @@ resource "aws_lambda_function" "ami_copier" {
   memory_size     = var.lambda_memory_size
 
   environment {
-    variables = merge({
-      AMI_NAME_TEMPLATE = var.ami_name_template
-      TAGS              = local.tags_json
-      }, var.enable_redhat_api ? {
-      REDHAT_SECRET_NAME = aws_secretsmanager_secret.redhat_api[0].name
-    } : {})
+    variables = merge(
+      {
+        AMI_NAME_TEMPLATE = var.ami_name_template
+        TAGS              = local.tags_json
+      },
+      var.enable_redhat_api ? {
+        REDHAT_CREDENTIAL_STORE = var.redhat_credential_store
+      } : {},
+      var.enable_redhat_api && var.redhat_credential_store == "ssm" ? {
+        CLIENT_ID_PARAM     = aws_ssm_parameter.redhat_client_id[0].name
+        CLIENT_SECRET_PARAM = aws_ssm_parameter.redhat_client_secret[0].name
+      } : {},
+      var.enable_redhat_api && var.redhat_credential_store == "secretsmanager" ? {
+        REDHAT_SECRET_NAME = aws_secretsmanager_secret.redhat_api[0].name
+      } : {}
+    )
   }
 
   depends_on = [

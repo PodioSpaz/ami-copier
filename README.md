@@ -144,8 +144,22 @@ By default, Red Hat Image Builder AMIs have generic names like `composer-api-5bc
 
 **Setup:**
 
-1. Get a Red Hat offline token from https://access.redhat.com/management/api
-2. Enable API integration in your module:
+#### Step 1: Create a Red Hat Service Account
+
+Service accounts are recommended over user tokens as they're not tied to individual users and provide better security for automation:
+
+1. Log in to [Red Hat Hybrid Cloud Console](https://console.redhat.com)
+2. Navigate to **Settings → Service Accounts**
+3. Click **Create service account**
+4. Enter a name (e.g., "ami-copier-automation") and description
+5. Save the **Client ID** and **Client secret** (shown only once!)
+6. Add the service account to a User Access group with the **RHEL viewer** role:
+   - Navigate to **Settings → User Access → Groups**
+   - Create a new group or use an existing one
+   - Add the **RHEL viewer** role to the group (grants read-only access to RHEL Insights, including Image Builder API)
+   - Add your service account to this group
+
+#### Step 2: Enable API Integration (Using SSM Parameter Store - Recommended)
 
 ```hcl
 module "ami_copier" {
@@ -154,9 +168,13 @@ module "ami_copier" {
   name_prefix       = "rhel9"
   ami_name_template = "rhel-9-encrypted-{date}"
 
-  # Enable Red Hat API integration
-  enable_redhat_api   = true
-  redhat_offline_token = var.redhat_offline_token  # Store in terraform.tfvars (gitignored)
+  # Enable Red Hat API integration with service account
+  enable_redhat_api     = true
+  redhat_client_id      = var.redhat_client_id      # Store in terraform.tfvars (gitignored)
+  redhat_client_secret  = var.redhat_client_secret  # Store in terraform.tfvars (gitignored)
+
+  # Optional: Specify credential store (defaults to "ssm")
+  # redhat_credential_store = "ssm"
 
   tags = {
     Environment = "production"
@@ -164,20 +182,64 @@ module "ami_copier" {
 }
 ```
 
-3. Store your offline token securely:
-
-```bash
-# In terraform.tfvars (add to .gitignore!)
-redhat_offline_token = "your-offline-token-here"
+**In `terraform.tfvars` (add to .gitignore!):**
+```hcl
+redhat_client_id     = "your-client-id-here"
+redhat_client_secret = "your-client-secret-here"
 ```
+
+#### Alternative: Using Secrets Manager
+
+If you prefer AWS Secrets Manager over SSM Parameter Store:
+
+```hcl
+module "ami_copier" {
+  source = "./ami-copier"
+
+  name_prefix       = "rhel9"
+  ami_name_template = "rhel-9-encrypted-{date}"
+
+  enable_redhat_api        = true
+  redhat_credential_store  = "secretsmanager"
+  redhat_client_id         = var.redhat_client_id
+  redhat_client_secret     = var.redhat_client_secret
+
+  tags = {
+    Environment = "production"
+  }
+}
+```
+
+#### Legacy: Offline Token Authentication (Deprecated)
+
+For backward compatibility, offline token authentication is still supported:
+
+```hcl
+module "ami_copier" {
+  source = "./ami-copier"
+
+  name_prefix       = "rhel9"
+  ami_name_template = "rhel-9-encrypted-{date}"
+
+  enable_redhat_api        = true
+  redhat_credential_store  = "secretsmanager"
+  redhat_offline_token     = var.redhat_offline_token
+
+  tags = {
+    Environment = "production"
+  }
+}
+```
+
+**Note:** Offline tokens are tied to user accounts and expire after 30 days of inactivity. Service accounts are recommended for production use.
 
 **How it works:**
 - Lambda queries the Image Builder API to find the compose that produced the AMI
 - Enriches tags with metadata like distribution, architecture, package count
 - Falls back to basic tagging if API is unavailable
-- Offline token is stored in AWS Secrets Manager
+- Credentials stored securely in SSM Parameter Store (default) or Secrets Manager
 
-**Note:** The Lambda timeout may need to be increased to 600 seconds when API integration is enabled, as it makes multiple HTTP requests to Red Hat's API.
+**Performance Note:** The Lambda timeout may need to be increased to 600 seconds when API integration is enabled, as it makes multiple HTTP requests to Red Hat's API.
 
 ## How It Works
 
@@ -244,7 +306,10 @@ The Lambda function requires these IAM permissions:
 | lambda_memory_size | Lambda memory in MB (128-10240) | number | 256 | no |
 | log_retention_days | CloudWatch Logs retention period | number | 7 | no |
 | enable_redhat_api | Enable Red Hat Image Builder API integration for enhanced tagging | bool | false | no |
-| redhat_offline_token | Red Hat offline token for API authentication (required if enable_redhat_api=true) | string (sensitive) | "" | no |
+| redhat_credential_store | Credential storage: 'ssm' (Parameter Store) or 'secretsmanager' (Secrets Manager) | string | "ssm" | no |
+| redhat_client_id | Red Hat Service Account Client ID (required if enable_redhat_api=true) | string (sensitive) | "" | no |
+| redhat_client_secret | Red Hat Service Account Client Secret (required if enable_redhat_api=true) | string (sensitive) | "" | no |
+| redhat_offline_token | [DEPRECATED] Red Hat offline token for legacy authentication | string (sensitive) | "" | no |
 
 ## Outputs
 
@@ -256,7 +321,8 @@ The Lambda function requires these IAM permissions:
 | eventbridge_rule_arn | ARN of the EventBridge rule |
 | eventbridge_rule_name | Name of the EventBridge rule |
 | cloudwatch_log_group_name | CloudWatch Log Group name |
-| redhat_api_secret_arn | ARN of the Secrets Manager secret (if API integration enabled) |
+| redhat_api_secret_arn | ARN of the Secrets Manager secret (if using secretsmanager credential store) |
+| redhat_ssm_parameter_arns | ARNs of SSM parameters for client_id and client_secret (if using ssm credential store) |
 
 ## Troubleshooting
 
