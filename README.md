@@ -415,7 +415,7 @@ The original AMI shared by Red Hat is:
 
 ## License
 
-MIT
+This project is licensed under the MIT License.
 
 ## Contributing
 
