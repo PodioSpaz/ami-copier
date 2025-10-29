@@ -14,13 +14,18 @@ output "lambda_role_arn" {
 }
 
 output "eventbridge_rule_arn" {
-  description = "ARN of the EventBridge rule that triggers AMI copying"
-  value       = aws_cloudwatch_event_rule.ami_shared.arn
+  description = "ARN of the EventBridge scheduled rule for AMI discovery"
+  value       = aws_cloudwatch_event_rule.ami_discovery.arn
 }
 
 output "eventbridge_rule_name" {
-  description = "Name of the EventBridge rule"
-  value       = aws_cloudwatch_event_rule.ami_shared.name
+  description = "Name of the EventBridge scheduled rule"
+  value       = aws_cloudwatch_event_rule.ami_discovery.name
+}
+
+output "schedule_expression" {
+  description = "Schedule expression for automated AMI discovery"
+  value       = var.schedule_expression
 }
 
 output "cloudwatch_log_group_name" {

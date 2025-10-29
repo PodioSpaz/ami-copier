@@ -8,13 +8,16 @@ variable "ami_name_template" {
   description = <<-EOT
     Template for naming copied AMIs. Available placeholders:
     - {source_name}: Name of the source AMI
+    - {uuid}: UUID extracted from Red Hat AMI name (composer-api-{uuid})
     - {date}: Current date/time in format YYYYMMDD-HHMMSS
     - {timestamp}: Unix timestamp
 
-    Example: 'rhel-{date}-encrypted-gp3' or '{source_name}-encrypted'
+    Example: 'rhel-{uuid}-encrypted-gp3' or '{source_name}-{uuid}-{date}'
+
+    Note: Including {uuid} ensures uniqueness and prevents duplicate copies.
   EOT
   type        = string
-  default     = "{source_name}-encrypted-gp3-{date}"
+  default     = "rhel-{uuid}-encrypted-gp3-{date}"
 }
 
 variable "tags" {
@@ -56,6 +59,23 @@ variable "log_retention_days" {
     ], var.log_retention_days)
     error_message = "Log retention days must be a valid CloudWatch Logs retention value."
   }
+}
+
+variable "schedule_expression" {
+  description = <<-EOT
+    EventBridge schedule expression for automated AMI discovery.
+    Uses rate() or cron() syntax.
+
+    Examples:
+    - 'rate(12 hours)' - Every 12 hours (default)
+    - 'rate(1 day)' - Once per day
+    - 'cron(0 */12 * * ? *)' - Every 12 hours using cron syntax
+    - 'cron(0 2 * * ? *)' - Daily at 2 AM UTC
+
+    See: https://docs.aws.amazon.com/eventbridge/latest/userguide/eb-create-rule-schedule.html
+  EOT
+  type        = string
+  default     = "rate(12 hours)"
 }
 
 variable "enable_redhat_api" {

@@ -6,36 +6,43 @@ Terraform module that automatically copies AMIs shared by Red Hat Image Builder,
 
 Red Hat Image Builder produces AMIs with unencrypted gp2 root volumes. This module solves that by:
 
-1. Detecting when an AMI is shared with your AWS account (via EventBridge)
-2. Automatically triggering a Lambda function
+1. Polling for AMIs shared by Red Hat Image Builder (scheduled every 12 hours)
+2. Automatically copying new AMIs via Lambda function
 3. Copying the AMI with:
    - All volumes converted from gp2 to gp3
    - Encryption enabled using AWS managed keys
    - Custom naming and tagging
+   - Automatic deduplication to prevent duplicate copies
 
 ## Architecture
 
 ```
-Red Hat Image Builder shares AMI
-            |
-            v
-    EventBridge Rule (ModifyImageAttribute)
+EventBridge Scheduled Rule (every 12h)
             |
             v
      Lambda Function
             |
             v
-    Copy AMI with gp3 + encryption
+  Discover Red Hat shared AMIs
+            |
+            v
+  Check if already copied (deduplication)
+            |
+            v
+    Copy new AMIs with gp3 + encryption
             |
             v
     Tagged encrypted AMI
 ```
 
+**Why polling instead of events?**
+
+The initial design attempted to detect AMI sharing via CloudTrail `ModifyImageAttribute` events. However, these events occur in the *creator account* (Red Hat's AWS account), not the consumer account. Polling via scheduled discovery is the correct approach for the consumer account. See [Issue #4](https://github.com/PodioSpaz/ami-copier/issues/4) for details.
+
 ## Requirements
 
 - Terraform >= 1.0
 - AWS Provider >= 5.0
-- AWS CloudTrail must be enabled (for EventBridge to detect AMI sharing events)
 
 ## Quick Start
 
@@ -77,15 +84,18 @@ module "ami_copier" {
 The `ami_name_template` variable supports placeholders:
 
 - `{source_name}` - Original AMI name (e.g., "composer-api-5bc3b908...")
+- `{uuid}` - UUID extracted from Red Hat AMI name (e.g., "5bc3b908-8cdd-489c-ab2f-cfaff7dc972e")
 - `{date}` - Current date/time (format: YYYYMMDD-HHMMSS)
 - `{timestamp}` - Unix timestamp
+
+**Recommended:** Include `{uuid}` in your template to ensure uniqueness and enable deduplication.
 
 ```hcl
 module "ami_copier" {
   source = "./ami-copier"
 
-  ami_name_template = "rhel-{date}-encrypted-gp3"
-  # Result: rhel-20250122-143022-encrypted-gp3
+  ami_name_template = "rhel-{uuid}-encrypted-gp3"
+  # Result: rhel-5bc3b908-8cdd-489c-ab2f-cfaff7dc972e-encrypted-gp3
 }
 ```
 
@@ -245,45 +255,56 @@ module "ami_copier" {
 
 ## How It Works
 
-### Event Detection
+### Scheduled Discovery
 
-The module creates an EventBridge rule that matches this pattern:
+The module creates an EventBridge scheduled rule that runs every 12 hours (configurable via `schedule_expression` variable). When triggered, the Lambda function:
 
-```json
-{
-  "source": ["aws.ec2"],
-  "detail-type": ["AWS API Call via CloudTrail"],
-  "detail": {
-    "eventName": ["ModifyImageAttribute"],
-    "requestParameters": {
-      "launchPermission": {
-        "add": {
-          "items": [{
-            "userId": ["YOUR_ACCOUNT_ID"]
-          }]
-        }
-      }
-    }
-  }
-}
-```
+1. Queries `DescribeImages` with owner filter: `463606842039` (Red Hat's AWS account ID)
+2. Filters for AMIs in `available` state
+3. Processes each discovered AMI
 
-When Red Hat Image Builder shares an AMI with your account, it calls `ModifyImageAttribute` to add your account ID to the AMI's launch permissions. This triggers the EventBridge rule.
+### Deduplication
+
+To prevent copying the same AMI multiple times:
+
+1. **Extract UUID** - Parses Red Hat AMI name pattern: `composer-api-{uuid}`
+2. **Generate Target Name** - Uses `ami_name_template` with placeholders replaced (including `{uuid}`)
+3. **Check Existence** - Queries `DescribeImages` (owner: self) for AMIs with that exact name
+4. **Skip if Found** - Logs skip message and moves to next AMI
+
+This ensures each Red Hat AMI is copied only once, even if the scheduled job runs multiple times.
 
 ### Lambda Function
 
-The Lambda function (`lambda/ami_copier.py`):
+The Lambda function (`lambda/ami_copier.py`) supports two invocation modes:
 
-1. Receives the EventBridge event with the source AMI ID
+**Scheduled Mode** (triggered by EventBridge):
+1. Discovers all shared Red Hat AMIs
+2. Processes each AMI (with deduplication)
+3. Returns summary of copied/skipped/errors
+
+**Manual Mode** (direct invocation with specific AMI ID):
+```bash
+aws lambda invoke \
+  --function-name <name>-ami-copier \
+  --payload '{"source_ami_id":"ami-xxxxx"}' \
+  response.json
+```
+
+For each AMI, the Lambda:
+
+1. Extracts UUID from source AMI name (if pattern matches)
 2. Describes the source AMI to get block device mappings
-3. Converts all gp2 volumes to gp3
-4. Copies the AMI with:
+3. Checks if target AMI name already exists (deduplication)
+4. Converts all gp2 volumes to gp3
+5. Copies the AMI with:
    - `Encrypted=True` (using AWS managed key)
    - Modified block device mappings (gp3)
    - Generated name from template
-5. Tags the new AMI with:
+6. Tags the new AMI with:
    - User-provided tags
    - `SourceAMI` - ID of the original AMI
+   - `SourceAMIUUID` - UUID from source AMI name
    - `CopiedBy` - Set to "ami-copier-lambda"
    - `CopyDate` - ISO timestamp
 
@@ -348,11 +369,12 @@ Releases are fully automated:
 | Name | Description | Type | Default | Required |
 |------|-------------|------|---------|----------|
 | name_prefix | Prefix for naming resources | string | "rhel" | no |
-| ami_name_template | Template for AMI names (supports {source_name}, {date}, {timestamp}) | string | "{source_name}-encrypted-gp3-{date}" | no |
+| ami_name_template | Template for AMI names (supports {source_name}, {uuid}, {date}, {timestamp}) | string | "rhel-{uuid}-encrypted-gp3-{date}" | no |
 | tags | Tags to apply to copied AMIs and resources | map(string) | {} | no |
 | lambda_timeout | Lambda timeout in seconds (60-900) | number | 300 | no |
 | lambda_memory_size | Lambda memory in MB (128-10240) | number | 256 | no |
 | log_retention_days | CloudWatch Logs retention period | number | 7 | no |
+| schedule_expression | EventBridge schedule expression (e.g., 'rate(12 hours)', 'cron(0 */12 * * ? *)') | string | "rate(12 hours)" | no |
 | enable_redhat_api | Enable Red Hat Image Builder API integration for enhanced tagging | bool | false | no |
 | redhat_credential_store | Credential storage: 'ssm' (Parameter Store) or 'secretsmanager' (Secrets Manager) | string | "ssm" | no |
 | redhat_client_id | Red Hat Service Account Client ID (required if enable_redhat_api=true) | string (sensitive) | "" | no |
@@ -366,30 +388,52 @@ Releases are fully automated:
 | lambda_function_arn | ARN of the Lambda function |
 | lambda_function_name | Name of the Lambda function |
 | lambda_role_arn | ARN of the Lambda IAM role |
-| eventbridge_rule_arn | ARN of the EventBridge rule |
-| eventbridge_rule_name | Name of the EventBridge rule |
+| eventbridge_rule_arn | ARN of the EventBridge scheduled rule |
+| eventbridge_rule_name | Name of the EventBridge scheduled rule |
+| schedule_expression | Schedule expression for automated discovery |
 | cloudwatch_log_group_name | CloudWatch Log Group name |
 | redhat_api_secret_arn | ARN of the Secrets Manager secret (if using secretsmanager credential store) |
 | redhat_ssm_parameter_arns | ARNs of SSM parameters for client_id and client_secret (if using ssm credential store) |
 
 ## Troubleshooting
 
-### AMI Not Being Copied
+### AMIs Not Being Copied
 
-1. Check CloudTrail is enabled in your region
-2. Check EventBridge rule is enabled:
+1. **Verify Red Hat has shared AMIs with your account:**
    ```bash
-   aws events describe-rule --name <rule-name>
+   aws ec2 describe-images --owners 463606842039 --filters "Name=state,Values=available"
    ```
-3. Check Lambda logs:
+
+2. **Check EventBridge scheduled rule:**
    ```bash
-   aws logs tail /aws/lambda/<function-name> --follow
+   aws events describe-rule --name <name-prefix>-ami-discovery
    ```
+
+3. **Check Lambda logs for recent runs:**
+   ```bash
+   aws logs tail /aws/lambda/<name-prefix>-ami-copier --since 24h
+   ```
+   Look for: "Scheduled polling mode: Discovering shared Red Hat AMIs"
+
+4. **Manually trigger the Lambda to test:**
+   ```bash
+   aws lambda invoke --function-name <name-prefix>-ami-copier --payload '{}' response.json
+   cat response.json | jq
+   ```
+
+### Duplicate Copies
+
+The module includes automatic deduplication. If an AMI with the same name already exists, it will be skipped. Check Lambda logs for: "AMI with name 'X' already exists, skipping copy"
+
+To force re-copy, either:
+- Change the `ami_name_template` variable
+- Deregister the existing copied AMI
 
 ### Lambda Timeout
 
-If copying large AMIs:
+If copying large AMIs or using API integration:
 - Increase `lambda_timeout` (up to 900 seconds)
+- Recommended: 600 seconds when `enable_redhat_api = true`
 - Note: AMI copy is asynchronous - Lambda initiates the copy and completes
 
 ### Finding Copied AMIs

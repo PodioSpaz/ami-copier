@@ -8,13 +8,22 @@ This is a Terraform module that automatically copies AMIs shared by Red Hat Imag
 
 ## Architecture
 
-The module uses an event-driven architecture:
+The module uses a **scheduled polling architecture**:
 
-1. **EventBridge Rule** (`main.tf:98-123`) - Monitors CloudTrail for `ModifyImageAttribute` API calls, which occur when Red Hat Image Builder shares an AMI with the account
-2. **Lambda Function** (`lambda/ami_copier.py`) - Triggered by EventBridge, copies the AMI with modified settings
-3. **IAM Role & Policies** (`main.tf:21-70`) - Grants Lambda permissions for EC2 operations and CloudWatch logging
+1. **EventBridge Scheduled Rule** (`main.tf:177-184`) - Triggers Lambda every 12 hours (configurable) to discover shared AMIs
+2. **Lambda Function** (`lambda/ami_copier.py`) - Polls for shared Red Hat AMIs and copies them with modified settings
+3. **IAM Role & Policies** (`main.tf:67-137`) - Grants Lambda permissions for EC2 operations and CloudWatch logging
 
-The Lambda function receives EventBridge events, extracts the source AMI ID, modifies block device mappings (gp2→gp3), and initiates an encrypted AMI copy using `ec2:CopyImage`.
+**Why polling instead of event-driven?**
+
+The initial design used EventBridge to monitor `ModifyImageAttribute` API calls via CloudTrail. However, these events are generated in the **creator account** (Red Hat's AWS account), not the consumer account where this module is deployed. See [AWS documentation](https://docs.aws.amazon.com/prescriptive-guidance/latest/patterns/monitor-use-of-a-shared-amazon-machine-image-across-multiple-aws-accounts.html) for details.
+
+The Lambda function:
+- Queries `DescribeImages` with owner filter `463606842039` (Red Hat's AWS account ID)
+- Extracts UUID from AMI name pattern: `composer-api-{uuid}`
+- Checks if AMI already copied (deduplication by name)
+- Modifies block device mappings (gp2→gp3)
+- Initiates an encrypted AMI copy using `ec2:CopyImage`
 
 ## Development Commands
 
@@ -36,17 +45,43 @@ terraform apply
 
 ### Testing the Lambda Function
 
-The Lambda function can be tested manually without deploying the full module:
+The Lambda function supports two invocation modes:
 
+**Scheduled Mode** (automatic discovery):
 ```bash
-# Invoke Lambda with test event (after deployment)
+# Manually trigger the scheduled discovery (scans all Red Hat AMIs)
 aws lambda invoke \
   --function-name <function-name> \
-  --payload '{"detail":{"requestParameters":{"imageId":"ami-xxxxx"}}}' \
+  --payload '{}' \
   response.json
 
-# View Lambda logs
+# View the response
+cat response.json | jq
+
+# Expected response includes summary and results for each AMI found
+```
+
+**Manual Mode** (specific AMI):
+```bash
+# Process a specific AMI on-demand
+aws lambda invoke \
+  --function-name <function-name> \
+  --payload '{"source_ami_id":"ami-xxxxx"}' \
+  response.json
+
+# View the response
+cat response.json | jq
+```
+
+**View Lambda Logs**:
+```bash
+# Follow logs in real-time
 aws logs tail /aws/lambda/<function-name> --follow
+
+# Check scheduled runs
+aws logs tail /aws/lambda/<function-name> \
+  --since 1h \
+  --filter-pattern "Scheduled polling mode"
 ```
 
 ### Finding Copied AMIs
@@ -60,14 +95,25 @@ aws ec2 describe-images \
 
 ## Key Implementation Details
 
-### EventBridge Event Pattern
+### Scheduled AMI Discovery
 
-The module requires AWS CloudTrail to be enabled. The EventBridge rule in `main.tf:103-120` listens for `ModifyImageAttribute` events where launch permissions are added for the current AWS account ID.
+The EventBridge scheduled rule (`main.tf:177-184`) triggers the Lambda function on a configurable schedule (default: every 12 hours). The Lambda queries `DescribeImages` filtering by Red Hat's AWS account ID (`463606842039`) to discover shared AMIs.
+
+### Deduplication Strategy
+
+To prevent copying the same AMI multiple times:
+
+1. **UUID Extraction** - Parses Red Hat AMI name pattern: `composer-api-{uuid}`
+2. **Name-based Check** - Generates target AMI name using template (includes UUID)
+3. **Existence Check** - Queries `DescribeImages` (owner: self) for AMIs with that name
+4. **Skip if Found** - Logs skip message and moves to next AMI
+
+The `{uuid}` placeholder in `ami_name_template` ensures uniqueness across copies.
 
 ### Lambda Environment Variables
 
-Configuration is passed to the Lambda function via environment variables (`main.tf:83-88`):
-- `AMI_NAME_TEMPLATE` - Template string with placeholders: `{source_name}`, `{date}`, `{timestamp}`
+Configuration is passed to the Lambda function via environment variables:
+- `AMI_NAME_TEMPLATE` - Template string with placeholders: `{source_name}`, `{uuid}`, `{date}`, `{timestamp}`
 - `TAGS` - JSON-encoded map of tags to apply to copied AMIs
 
 ### Block Device Mapping Transformation
@@ -81,8 +127,9 @@ The actual AMI copy operation uses `Encrypted=True` which applies AWS-managed en
 
 ### Automatic Tagging
 
-All copied AMIs receive user-provided tags plus three automatic tags (`ami_copier.py:124-127`):
+All copied AMIs receive user-provided tags plus automatic tags:
 - `SourceAMI` - Original AMI ID for tracking
+- `SourceAMIUUID` - UUID extracted from source AMI name (if available)
 - `CopiedBy` - Set to "ami-copier-lambda"
 - `CopyDate` - ISO timestamp of copy operation
 
@@ -159,11 +206,17 @@ Each instance creates its own Lambda function and EventBridge rule. The `name_pr
 
 ## Troubleshooting
 
-### EventBridge Not Triggering
+### Scheduled Rule Not Running
 
-- Verify CloudTrail is enabled in the region
-- Check EventBridge rule status: `aws events describe-rule --name <rule-name>`
-- Review CloudTrail events for `ModifyImageAttribute` calls
+- Check EventBridge rule status: `aws events describe-rule --name ${name_prefix}-ami-discovery`
+- Verify rule is enabled: `aws events list-targets-by-rule --rule ${name_prefix}-ami-discovery`
+- Check recent executions in CloudWatch Logs: `aws logs tail /aws/lambda/${name_prefix}-ami-copier --since 24h`
+
+### No AMIs Being Discovered
+
+- Verify Red Hat has shared AMIs with your account
+- Test manually: `aws ec2 describe-images --owners 463606842039 --filters "Name=state,Values=available"`
+- Check Lambda logs for "Found X available AMIs from Red Hat" message
 
 ### Lambda Errors
 

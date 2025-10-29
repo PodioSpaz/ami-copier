@@ -1,6 +1,7 @@
 import json
 import logging
 import os
+import re
 from datetime import datetime
 from typing import Any, Dict, List, Optional, Tuple
 from urllib import request, parse
@@ -17,6 +18,9 @@ logger.setLevel(logging.INFO)
 ec2_client = boto3.client('ec2')
 secretsmanager_client = boto3.client('secretsmanager')
 ssm_client = boto3.client('ssm')
+
+# Red Hat AWS Account ID
+REDHAT_ACCOUNT_ID = '463606842039'
 
 
 def get_block_device_mappings(source_ami_id: str) -> List[Dict[str, Any]]:
@@ -322,13 +326,36 @@ def enrich_tags_from_compose(tags: Dict[str, str], compose: Dict[str, Any], stat
     return enriched
 
 
-def generate_ami_name(template: str, source_image: Dict[str, Any]) -> str:
+def extract_uuid_from_ami_name(ami_name: str) -> Optional[str]:
+    """
+    Extract UUID from Red Hat AMI name pattern: composer-api-{uuid}
+
+    Args:
+        ami_name: AMI name to parse
+
+    Returns:
+        UUID string or None if pattern doesn't match
+    """
+    # Pattern: composer-api-{uuid}
+    # UUID format: 8-4-4-4-12 hex characters
+    pattern = r'composer-api-([0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12})'
+    match = re.search(pattern, ami_name, re.IGNORECASE)
+
+    if match:
+        return match.group(1)
+
+    logger.warning(f"Could not extract UUID from AMI name: {ami_name}")
+    return None
+
+
+def generate_ami_name(template: str, source_image: Dict[str, Any], uuid: Optional[str] = None) -> str:
     """
     Generate AMI name from template.
 
     Args:
         template: Name template with placeholders
         source_image: Source AMI metadata
+        uuid: Optional UUID extracted from source AMI name
 
     Returns:
         Generated AMI name
@@ -341,10 +368,81 @@ def generate_ami_name(template: str, source_image: Dict[str, Any]) -> str:
     name = name.replace('{date}', creation_date)
     name = name.replace('{timestamp}', str(int(datetime.utcnow().timestamp())))
 
+    # Add UUID placeholder support
+    if uuid:
+        name = name.replace('{uuid}', uuid)
+    else:
+        # Remove {uuid} placeholder if no UUID available
+        name = name.replace('{uuid}', 'no-uuid')
+
     return name
 
 
-def copy_ami(source_ami_id: str, ami_name: str, tags: Dict[str, str]) -> str:
+def discover_shared_amis() -> List[Dict[str, Any]]:
+    """
+    Discover AMIs shared by Red Hat Image Builder.
+
+    Returns:
+        List of AMI metadata dictionaries
+    """
+    try:
+        logger.info(f"Discovering AMIs shared by Red Hat (account {REDHAT_ACCOUNT_ID})")
+
+        response = ec2_client.describe_images(
+            Owners=[REDHAT_ACCOUNT_ID],
+            Filters=[
+                {
+                    'Name': 'state',
+                    'Values': ['available']
+                }
+            ]
+        )
+
+        amis = response.get('Images', [])
+        logger.info(f"Found {len(amis)} available AMIs from Red Hat")
+
+        return amis
+
+    except ClientError as e:
+        logger.error(f"Error discovering shared AMIs: {e}")
+        raise
+
+
+def ami_already_copied(ami_name: str) -> bool:
+    """
+    Check if an AMI with the given name already exists in this account.
+
+    Args:
+        ami_name: Name of the AMI to check
+
+    Returns:
+        True if AMI exists, False otherwise
+    """
+    try:
+        response = ec2_client.describe_images(
+            Owners=['self'],
+            Filters=[
+                {
+                    'Name': 'name',
+                    'Values': [ami_name]
+                }
+            ]
+        )
+
+        exists = len(response.get('Images', [])) > 0
+
+        if exists:
+            logger.info(f"AMI with name '{ami_name}' already exists, skipping copy")
+
+        return exists
+
+    except ClientError as e:
+        logger.error(f"Error checking for existing AMI: {e}")
+        # On error, return False to allow copy attempt (fail safe)
+        return False
+
+
+def copy_ami(source_ami_id: str, ami_name: str, tags: Dict[str, str], uuid: Optional[str] = None) -> str:
     """
     Copy AMI with encryption and gp3 volumes.
 
@@ -352,6 +450,7 @@ def copy_ami(source_ami_id: str, ami_name: str, tags: Dict[str, str]) -> str:
         source_ami_id: Source AMI ID to copy
         ami_name: Name for the new AMI
         tags: Tags to apply to the AMI and snapshots
+        uuid: Optional UUID extracted from source AMI name
 
     Returns:
         The new AMI ID
@@ -377,11 +476,15 @@ def copy_ami(source_ami_id: str, ami_name: str, tags: Dict[str, str]) -> str:
 
         # Tag the new AMI
         if tags:
-            # Add source AMI ID to tags for tracking
+            # Add source AMI ID and metadata to tags for tracking
             all_tags = tags.copy()
             all_tags['SourceAMI'] = source_ami_id
             all_tags['CopiedBy'] = 'ami-copier-lambda'
             all_tags['CopyDate'] = datetime.utcnow().isoformat()
+
+            # Add UUID if available
+            if uuid:
+                all_tags['SourceAMIUUID'] = uuid
 
             tag_list = [{'Key': k, 'Value': v} for k, v in all_tags.items()]
 
@@ -402,52 +505,54 @@ def copy_ami(source_ami_id: str, ami_name: str, tags: Dict[str, str]) -> str:
         raise
 
 
-def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+def process_ami(source_ami_id: str, ami_name_template: str, base_tags: Dict[str, str]) -> Dict[str, Any]:
     """
-    Lambda handler for AMI copy automation.
-
-    Triggered by EventBridge when an AMI is shared with the account.
+    Process a single AMI: extract UUID, check for duplicates, enrich tags, and copy.
 
     Args:
-        event: EventBridge event
-        context: Lambda context
+        source_ami_id: Source AMI ID to process
+        ami_name_template: Template for generating AMI name
+        base_tags: Base tags to apply
 
     Returns:
-        Response dictionary
+        Dictionary with processing results
     """
-    logger.info(f"Received event: {json.dumps(event)}")
-
     try:
-        # Extract AMI ID from the event
-        # EventBridge event structure for ModifyImageAttribute
-        detail = event.get('detail', {})
-        request_parameters = detail.get('requestParameters', {})
-
-        source_ami_id = request_parameters.get('imageId')
-
-        if not source_ami_id:
-            logger.error("No AMI ID found in event")
-            return {
-                'statusCode': 400,
-                'body': json.dumps({'error': 'No AMI ID in event'})
-            }
-
-        # Get configuration from environment variables
-        ami_name_template = os.environ.get('AMI_NAME_TEMPLATE', '{source_name}-encrypted-gp3-{date}')
-        tags_json = os.environ.get('TAGS', '{}')
-        tags = json.loads(tags_json)
-
-        # Get source image details for name generation
+        # Get source AMI details
         response = ec2_client.describe_images(ImageIds=[source_ami_id])
         if not response['Images']:
             logger.error(f"Source AMI {source_ami_id} not found")
             return {
-                'statusCode': 404,
-                'body': json.dumps({'error': f'AMI {source_ami_id} not found'})
+                'source_ami_id': source_ami_id,
+                'status': 'error',
+                'message': 'AMI not found'
             }
 
         source_image = response['Images'][0]
-        ami_name = generate_ami_name(ami_name_template, source_image)
+        source_ami_name = source_image.get('Name', 'unknown')
+
+        logger.info(f"Processing AMI {source_ami_id} (name: {source_ami_name})")
+
+        # Extract UUID from source AMI name
+        uuid = extract_uuid_from_ami_name(source_ami_name)
+        if uuid:
+            logger.info(f"Extracted UUID: {uuid}")
+
+        # Generate target AMI name
+        ami_name = generate_ami_name(ami_name_template, source_image, uuid)
+        logger.info(f"Generated target AMI name: {ami_name}")
+
+        # Check for duplicates
+        if ami_already_copied(ami_name):
+            return {
+                'source_ami_id': source_ami_id,
+                'status': 'skipped',
+                'message': f'AMI already copied with name: {ami_name}',
+                'ami_name': ami_name
+            }
+
+        # Start with base tags
+        tags = base_tags.copy()
 
         # Try to enrich tags from Image Builder API
         credentials = get_redhat_credentials()
@@ -471,22 +576,115 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             logger.info("Red Hat API credentials not configured, using basic tags")
 
         # Copy the AMI
-        new_ami_id = copy_ami(source_ami_id, ami_name, tags)
+        new_ami_id = copy_ami(source_ami_id, ami_name, tags, uuid)
 
         logger.info(f"Successfully initiated copy of {source_ami_id} to {new_ami_id}")
 
         return {
-            'statusCode': 200,
-            'body': json.dumps({
-                'message': 'AMI copy initiated successfully',
-                'sourceAMI': source_ami_id,
-                'newAMI': new_ami_id,
-                'name': ami_name
-            })
+            'source_ami_id': source_ami_id,
+            'new_ami_id': new_ami_id,
+            'ami_name': ami_name,
+            'uuid': uuid,
+            'status': 'copied'
         }
 
     except Exception as e:
-        logger.error(f"Error processing event: {e}", exc_info=True)
+        logger.error(f"Error processing AMI {source_ami_id}: {e}", exc_info=True)
+        return {
+            'source_ami_id': source_ami_id,
+            'status': 'error',
+            'message': str(e)
+        }
+
+
+def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
+    """
+    Lambda handler for AMI copy automation.
+
+    Supports two invocation modes:
+    1. Scheduled mode (EventBridge scheduled rule) - Discovers and processes all shared Red Hat AMIs
+    2. Manual mode (direct invocation) - Processes a specific AMI provided in the event
+
+    Args:
+        event: Lambda event with optional 'source_ami_id' for manual mode
+        context: Lambda context
+
+    Returns:
+        Response dictionary with processing results
+    """
+    logger.info(f"Received event: {json.dumps(event)}")
+
+    try:
+        # Get configuration from environment variables
+        ami_name_template = os.environ.get('AMI_NAME_TEMPLATE', '{source_name}-encrypted-gp3-{uuid}-{date}')
+        tags_json = os.environ.get('TAGS', '{}')
+        base_tags = json.loads(tags_json)
+
+        # Check if this is a manual invocation with specific AMI ID
+        source_ami_id = event.get('source_ami_id')
+
+        if source_ami_id:
+            # Manual mode: Process specific AMI
+            logger.info(f"Manual invocation mode: Processing AMI {source_ami_id}")
+
+            result = process_ami(source_ami_id, ami_name_template, base_tags)
+
+            return {
+                'statusCode': 200 if result['status'] == 'copied' else 400,
+                'body': json.dumps({
+                    'mode': 'manual',
+                    'result': result
+                })
+            }
+
+        else:
+            # Scheduled mode: Discover and process all shared AMIs
+            logger.info("Scheduled polling mode: Discovering shared Red Hat AMIs")
+
+            shared_amis = discover_shared_amis()
+
+            if not shared_amis:
+                logger.info("No shared AMIs found from Red Hat")
+                return {
+                    'statusCode': 200,
+                    'body': json.dumps({
+                        'mode': 'scheduled',
+                        'message': 'No shared AMIs found',
+                        'results': []
+                    })
+                }
+
+            logger.info(f"Processing {len(shared_amis)} shared AMIs")
+
+            results = []
+            for ami in shared_amis:
+                ami_id = ami['ImageId']
+                result = process_ami(ami_id, ami_name_template, base_tags)
+                results.append(result)
+
+            # Summarize results
+            copied_count = sum(1 for r in results if r['status'] == 'copied')
+            skipped_count = sum(1 for r in results if r['status'] == 'skipped')
+            error_count = sum(1 for r in results if r['status'] == 'error')
+
+            logger.info(f"Processing complete: {copied_count} copied, {skipped_count} skipped, {error_count} errors")
+
+            return {
+                'statusCode': 200,
+                'body': json.dumps({
+                    'mode': 'scheduled',
+                    'summary': {
+                        'total': len(shared_amis),
+                        'copied': copied_count,
+                        'skipped': skipped_count,
+                        'errors': error_count
+                    },
+                    'results': results
+                })
+            }
+
+    except Exception as e:
+        logger.error(f"Error in lambda_handler: {e}", exc_info=True)
         return {
             'statusCode': 500,
             'body': json.dumps({'error': str(e)})
