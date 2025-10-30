@@ -16,71 +16,64 @@ Red Hat Image Builder produces AMIs with unencrypted gp2 root volumes. This modu
 
 ## Architecture
 
+### Core Flow
+
 ```mermaid
-graph TB
-    subgraph "AWS Account"
-        EB[EventBridge Scheduled Rule<br/>rate: 12 hours]
+graph LR
+    EB[EventBridge<br/>Scheduled Rule<br/>every 12h]
+    Lambda[Lambda Function<br/>ami_copier.py]
+    Source[Red Hat AMIs<br/>gp2 unencrypted]
+    Target[Copied AMIs<br/>gp3 encrypted]
 
-        subgraph "Lambda Execution"
-            Lambda[Lambda Function<br/>ami_copier.py]
-            IAM[IAM Role & Policies<br/>EC2, CloudWatch Logs]
-        end
+    EB -->|Trigger| Lambda
+    Lambda -->|1. Discover| Source
+    Lambda -->|2. Check exists| Target
+    Lambda -->|3. Copy| Target
 
-        subgraph "Credential Storage<br/><i>Optional: API Integration</i>"
-            SSM[SSM Parameter Store<br/>client_id + client_secret]
-            SM[Secrets Manager<br/>client_id + client_secret]
-        end
-
-        subgraph "EC2 Service"
-            Source[Red Hat Shared AMIs<br/>Owner: 463606842039<br/>gp2 unencrypted]
-            Target[Copied AMIs<br/>gp3 encrypted<br/>Tagged & Named]
-        end
-
-        CW[CloudWatch Logs<br/>/aws/lambda/ami-copier]
-    end
-
-    subgraph "Red Hat Services<br/><i>Optional Integration</i>"
-        SSO[Red Hat SSO<br/>OAuth2 Token Exchange]
-        API[Image Builder API<br/>Compose Metadata]
-    end
-
-    %% Main Flow
-    EB -->|Triggers every 12h| Lambda
-    Lambda -->|DescribeImages<br/>Filter: Owner=463606842039| Source
-    Lambda -->|Check Deduplication<br/>DescribeImages: Owner=self| Target
-    Lambda -->|CopyImage<br/>Encrypted=true<br/>gp2→gp3| Target
-    Lambda -->|Uses| IAM
-    Lambda -->|Writes logs| CW
-
-    %% Optional API Integration
-    Lambda -.->|Retrieve credentials<br/>if enabled| SSM
-    Lambda -.->|Retrieve credentials<br/>if enabled| SM
-    Lambda -.->|Authenticate<br/>client_credentials grant| SSO
-    SSO -.->|Access Token<br/>15min lifetime| Lambda
-    Lambda -.->|Query compose metadata<br/>GET /composes?limit=100| API
-    API -.->|Enriched tags<br/>Distribution, Architecture, etc.| Lambda
-
-    %% Styling
-    classDef optional stroke-dasharray: 5 5
-    class SSM,SM,SSO,API optional
-
-    style Lambda fill:#FF9900,stroke:#232F3E,color:#fff
+    style Lambda fill:#FF9900,stroke:#232F3E,color:#fff,stroke-width:3px
     style EB fill:#E7157B,stroke:#232F3E,color:#fff
     style Source fill:#527FFF,stroke:#232F3E,color:#fff
     style Target fill:#7AA116,stroke:#232F3E,color:#fff
-    style CW fill:#FF4F8B,stroke:#232F3E,color:#fff
-    style SSO fill:#EE0000,stroke:#232F3E,color:#fff
-    style API fill:#EE0000,stroke:#232F3E,color:#fff
+```
+
+### With Optional Red Hat API Integration
+
+```mermaid
+graph LR
+    EB[EventBridge<br/>Scheduled Rule]
+    Lambda[Lambda Function]
+    Creds[SSM / Secrets<br/>Manager]
+    RHSSO[Red Hat SSO]
+    RHAPI[Image Builder<br/>API]
+    Source[Red Hat AMIs]
+    Target[Copied AMIs<br/>+ Metadata Tags]
+
+    EB -->|Trigger| Lambda
+    Lambda -->|Discover| Source
+    Lambda -.->|Get credentials| Creds
+    Lambda -.->|Authenticate| RHSSO
+    RHSSO -.->|Token| Lambda
+    Lambda -.->|Query metadata| RHAPI
+    Lambda -->|Copy + Enrich| Target
+
+    style Lambda fill:#FF9900,stroke:#232F3E,color:#fff,stroke-width:3px
+    style EB fill:#E7157B,stroke:#232F3E,color:#fff
+    style Source fill:#527FFF,stroke:#232F3E,color:#fff
+    style Target fill:#7AA116,stroke:#232F3E,color:#fff
+    style RHSSO fill:#EE0000,stroke:#232F3E,color:#fff
+    style RHAPI fill:#EE0000,stroke:#232F3E,color:#fff
+    style Creds fill:#DD344C,stroke:#232F3E,color:#fff
 ```
 
 **Key Components:**
 
 - **EventBridge Scheduled Rule**: Triggers Lambda every 12 hours (configurable)
 - **Lambda Function**: Polls for Red Hat AMIs, performs deduplication, and copies with encryption
-- **IAM Role**: Grants permissions for EC2 operations and CloudWatch logging
-- **CloudWatch Logs**: Captures Lambda execution logs and errors
-- **Credential Storage** _(Optional)_: SSM Parameter Store (default) or Secrets Manager for Red Hat API credentials
-- **Red Hat Services** _(Optional)_: OAuth2 authentication and Image Builder API for metadata enrichment
+- **Red Hat AMIs**: Source AMIs shared by Red Hat (Owner: 463606842039) with gp2 unencrypted volumes
+- **Copied AMIs**: Target AMIs with gp3 encrypted volumes, custom naming, and automatic tagging
+- **SSM/Secrets Manager** _(Optional)_: Stores Red Hat API credentials for metadata enrichment
+- **Red Hat SSO** _(Optional)_: OAuth2 authentication for API access
+- **Image Builder API** _(Optional)_: Provides compose metadata for enhanced tagging
 
 **Why polling instead of events?**
 
