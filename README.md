@@ -16,24 +16,71 @@ Red Hat Image Builder produces AMIs with unencrypted gp2 root volumes. This modu
 
 ## Architecture
 
+```mermaid
+graph TB
+    subgraph "AWS Account"
+        EB[EventBridge Scheduled Rule<br/>rate: 12 hours]
+
+        subgraph "Lambda Execution"
+            Lambda[Lambda Function<br/>ami_copier.py]
+            IAM[IAM Role & Policies<br/>EC2, CloudWatch Logs]
+        end
+
+        subgraph "Credential Storage<br/><i>Optional: API Integration</i>"
+            SSM[SSM Parameter Store<br/>client_id + client_secret]
+            SM[Secrets Manager<br/>client_id + client_secret]
+        end
+
+        subgraph "EC2 Service"
+            Source[Red Hat Shared AMIs<br/>Owner: 463606842039<br/>gp2 unencrypted]
+            Target[Copied AMIs<br/>gp3 encrypted<br/>Tagged & Named]
+        end
+
+        CW[CloudWatch Logs<br/>/aws/lambda/ami-copier]
+    end
+
+    subgraph "Red Hat Services<br/><i>Optional Integration</i>"
+        SSO[Red Hat SSO<br/>OAuth2 Token Exchange]
+        API[Image Builder API<br/>Compose Metadata]
+    end
+
+    %% Main Flow
+    EB -->|Triggers every 12h| Lambda
+    Lambda -->|DescribeImages<br/>Filter: Owner=463606842039| Source
+    Lambda -->|Check Deduplication<br/>DescribeImages: Owner=self| Target
+    Lambda -->|CopyImage<br/>Encrypted=true<br/>gp2→gp3| Target
+    Lambda -->|Uses| IAM
+    Lambda -->|Writes logs| CW
+
+    %% Optional API Integration
+    Lambda -.->|Retrieve credentials<br/>if enabled| SSM
+    Lambda -.->|Retrieve credentials<br/>if enabled| SM
+    Lambda -.->|Authenticate<br/>client_credentials grant| SSO
+    SSO -.->|Access Token<br/>15min lifetime| Lambda
+    Lambda -.->|Query compose metadata<br/>GET /composes?limit=100| API
+    API -.->|Enriched tags<br/>Distribution, Architecture, etc.| Lambda
+
+    %% Styling
+    classDef optional stroke-dasharray: 5 5
+    class SSM,SM,SSO,API optional
+
+    style Lambda fill:#FF9900,stroke:#232F3E,color:#fff
+    style EB fill:#E7157B,stroke:#232F3E,color:#fff
+    style Source fill:#527FFF,stroke:#232F3E,color:#fff
+    style Target fill:#7AA116,stroke:#232F3E,color:#fff
+    style CW fill:#FF4F8B,stroke:#232F3E,color:#fff
+    style SSO fill:#EE0000,stroke:#232F3E,color:#fff
+    style API fill:#EE0000,stroke:#232F3E,color:#fff
 ```
-EventBridge Scheduled Rule (every 12h)
-            |
-            v
-     Lambda Function
-            |
-            v
-  Discover Red Hat shared AMIs
-            |
-            v
-  Check if already copied (deduplication)
-            |
-            v
-    Copy new AMIs with gp3 + encryption
-            |
-            v
-    Tagged encrypted AMI
-```
+
+**Key Components:**
+
+- **EventBridge Scheduled Rule**: Triggers Lambda every 12 hours (configurable)
+- **Lambda Function**: Polls for Red Hat AMIs, performs deduplication, and copies with encryption
+- **IAM Role**: Grants permissions for EC2 operations and CloudWatch logging
+- **CloudWatch Logs**: Captures Lambda execution logs and errors
+- **Credential Storage** _(Optional)_: SSM Parameter Store (default) or Secrets Manager for Red Hat API credentials
+- **Red Hat Services** _(Optional)_: OAuth2 authentication and Image Builder API for metadata enrichment
 
 **Why polling instead of events?**
 
