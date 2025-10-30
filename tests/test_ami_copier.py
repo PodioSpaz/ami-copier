@@ -5,8 +5,11 @@ Tests cover:
 - Credential retrieval from SSM Parameter Store and Secrets Manager
 - Red Hat API authentication (service account and offline token)
 - Red Hat API interactions (compose lookup, metadata retrieval)
+- UUID extraction from Red Hat AMI names
+- AMI discovery from Red Hat account
+- Deduplication checks
 - AMI operations (block device mapping conversion, AMI copying)
-- Lambda handler event processing
+- Lambda handler event processing (scheduled and manual modes)
 """
 import json
 import os
@@ -90,25 +93,50 @@ def sample_ami_data():
 
 
 @pytest.fixture
-def sample_eventbridge_event():
-    """Sample EventBridge event for testing."""
+def sample_redhat_ami_data():
+    """Sample Red Hat AMI data with UUID in name."""
+    return {
+        'ImageId': 'ami-redhat123',
+        'Name': 'composer-api-a1b2c3d4-5678-90ab-cdef-1234567890ab',
+        'Description': 'Red Hat Enterprise Linux 9',
+        'OwnerId': '463606842039',
+        'State': 'available',
+        'BlockDeviceMappings': [
+            {
+                'DeviceName': '/dev/sda1',
+                'Ebs': {
+                    'VolumeType': 'gp2',
+                    'VolumeSize': 10,
+                    'DeleteOnTermination': True,
+                    'SnapshotId': 'snap-rh123',
+                    'Encrypted': False
+                }
+            }
+        ]
+    }
+
+
+@pytest.fixture
+def sample_scheduled_event():
+    """Sample EventBridge scheduled event for testing."""
     return {
         'version': '0',
-        'id': 'test-event-id',
-        'detail-type': 'AWS API Call via CloudTrail',
-        'source': 'aws.ec2',
+        'id': 'scheduled-event-id',
+        'detail-type': 'Scheduled Event',
+        'source': 'aws.events',
         'account': '123456789012',
         'time': '2024-10-25T12:00:00Z',
         'region': 'us-east-1',
-        'detail': {
-            'eventName': 'ModifyImageAttribute',
-            'requestParameters': {
-                'imageId': 'ami-12345678',
-                'launchPermission': {
-                    'add': [{'userId': '123456789012'}]
-                }
-            }
-        }
+        'resources': ['arn:aws:events:us-east-1:123456789012:rule/rhel-ami-discovery'],
+        'detail': {}
+    }
+
+
+@pytest.fixture
+def sample_manual_event():
+    """Sample manual invocation event for testing."""
+    return {
+        'source_ami_id': 'ami-12345678'
     }
 
 
@@ -546,6 +574,129 @@ class TestGetBlockDeviceMappings:
                 pass
 
 
+# Tests for extract_uuid_from_ami_name()
+class TestExtractUuidFromAmiName:
+    """Tests for UUID extraction from AMI names."""
+
+    def test_extract_uuid_success(self):
+        """Test successful UUID extraction from Red Hat AMI name."""
+        ami_name = 'composer-api-a1b2c3d4-5678-90ab-cdef-1234567890ab'
+        uuid = ami_copier.extract_uuid_from_ami_name(ami_name)
+        assert uuid == 'a1b2c3d4-5678-90ab-cdef-1234567890ab'
+
+    def test_extract_uuid_with_suffix(self):
+        """Test UUID extraction with additional suffix."""
+        ami_name = 'composer-api-a1b2c3d4-5678-90ab-cdef-1234567890ab-extra'
+        uuid = ami_copier.extract_uuid_from_ami_name(ami_name)
+        assert uuid == 'a1b2c3d4-5678-90ab-cdef-1234567890ab'
+
+    def test_extract_uuid_uppercase(self):
+        """Test UUID extraction with uppercase letters."""
+        ami_name = 'composer-api-A1B2C3D4-5678-90AB-CDEF-1234567890AB'
+        uuid = ami_copier.extract_uuid_from_ami_name(ami_name)
+        assert uuid.lower() == 'a1b2c3d4-5678-90ab-cdef-1234567890ab'
+
+    def test_extract_uuid_no_match(self):
+        """Test UUID extraction with non-matching pattern."""
+        ami_name = 'rhel-9-base'
+        uuid = ami_copier.extract_uuid_from_ami_name(ami_name)
+        assert uuid is None
+
+    def test_extract_uuid_invalid_format(self):
+        """Test UUID extraction with invalid UUID format."""
+        ami_name = 'composer-api-invalid-uuid'
+        uuid = ami_copier.extract_uuid_from_ami_name(ami_name)
+        assert uuid is None
+
+
+# Tests for discover_shared_amis()
+class TestDiscoverSharedAmis:
+    """Tests for AMI discovery."""
+
+    def test_discover_amis_success(self, mock_ec2_client, sample_redhat_ami_data):
+        """Test successful AMI discovery."""
+        # Register a Red Hat-style AMI in moto
+        mock_ec2_client.register_image(
+            Name=sample_redhat_ami_data['Name'],
+            Description=sample_redhat_ami_data['Description'],
+            Architecture='x86_64',
+            RootDeviceName='/dev/sda1'
+        )
+
+        # Mock the describe_images call
+        with patch('ami_copier.ec2_client') as mock_client:
+            mock_client.describe_images.return_value = {
+                'Images': [sample_redhat_ami_data]
+            }
+
+            amis = ami_copier.discover_shared_amis()
+
+        assert len(amis) == 1
+        assert amis[0]['ImageId'] == 'ami-redhat123'
+        assert 'composer-api' in amis[0]['Name']
+
+    def test_discover_amis_no_results(self):
+        """Test AMI discovery with no shared AMIs."""
+        with patch('ami_copier.ec2_client') as mock_client:
+            mock_client.describe_images.return_value = {'Images': []}
+
+            amis = ami_copier.discover_shared_amis()
+
+        assert len(amis) == 0
+
+    def test_discover_amis_filters_unavailable(self):
+        """Test that discovery filters for available AMIs only."""
+        with patch('ami_copier.ec2_client') as mock_client:
+            amis = ami_copier.discover_shared_amis()
+
+            # Verify the describe_images call used correct filters
+            mock_client.describe_images.assert_called_once()
+            call_kwargs = mock_client.describe_images.call_args[1]
+            assert call_kwargs['Owners'] == ['463606842039']
+            assert any(f['Name'] == 'state' and f['Values'] == ['available']
+                      for f in call_kwargs['Filters'])
+
+
+# Tests for ami_already_copied()
+class TestAmiAlreadyCopied:
+    """Tests for deduplication check."""
+
+    def test_ami_exists(self, mock_ec2_client):
+        """Test when AMI with same name already exists."""
+        # Create an AMI with a specific name
+        mock_ec2_client.register_image(
+            Name='rhel-9-test-encrypted',
+            Architecture='x86_64',
+            RootDeviceName='/dev/sda1'
+        )
+
+        with patch('ami_copier.ec2_client', mock_ec2_client):
+            exists = ami_copier.ami_already_copied('rhel-9-test-encrypted')
+
+        assert exists is True
+
+    def test_ami_does_not_exist(self, mock_ec2_client):
+        """Test when AMI with name does not exist."""
+        with patch('ami_copier.ec2_client', mock_ec2_client):
+            exists = ami_copier.ami_already_copied('nonexistent-ami')
+
+        assert exists is False
+
+    def test_ami_check_error_handling(self):
+        """Test error handling in deduplication check."""
+        with patch('ami_copier.ec2_client') as mock_client:
+            from botocore.exceptions import ClientError
+            mock_client.describe_images.side_effect = ClientError(
+                {'Error': {'Code': 'InvalidParameterValue'}},
+                'DescribeImages'
+            )
+
+            # Should return False on error (fail-safe)
+            exists = ami_copier.ami_already_copied('test-ami')
+
+        assert exists is False
+
+
 # Tests for generate_ami_name()
 class TestGenerateAmiName:
     """Tests for AMI name generation."""
@@ -579,13 +730,31 @@ class TestGenerateAmiName:
         timestamp_part = name.replace('ami-', '')
         assert timestamp_part.isdigit()
 
+    def test_template_with_uuid(self):
+        """Test name generation with UUID placeholder."""
+        source_image = {'Name': 'test'}
+        template = 'rhel-{uuid}-encrypted'
+        uuid = 'a1b2c3d4-5678-90ab-cdef-1234567890ab'
+
+        name = ami_copier.generate_ami_name(template, source_image, uuid)
+        assert name == 'rhel-a1b2c3d4-5678-90ab-cdef-1234567890ab-encrypted'
+
+    def test_template_with_uuid_none(self):
+        """Test name generation when UUID is None."""
+        source_image = {'Name': 'test'}
+        template = 'rhel-{uuid}-encrypted'
+
+        name = ami_copier.generate_ami_name(template, source_image, None)
+        assert name == 'rhel-no-uuid-encrypted'
+
     def test_template_with_all_placeholders(self):
         """Test name generation with all placeholders."""
         source_image = {'Name': 'rhel-9'}
-        template = '{source_name}-{date}-{timestamp}'
+        template = '{source_name}-{uuid}-{date}-{timestamp}'
+        uuid = 'test-uuid-1234'
 
-        name = ami_copier.generate_ami_name(template, source_image)
-        assert name.startswith('rhel-9-')
+        name = ami_copier.generate_ami_name(template, source_image, uuid)
+        assert name.startswith('rhel-9-test-uuid-1234-')
 
 
 # Tests for copy_ami()
@@ -628,22 +797,12 @@ class TestCopyAmi:
         # Verify tags were applied
         assert mock_client.create_tags.called
 
-
-# Tests for lambda_handler()
-class TestLambdaHandler:
-    """Tests for the main Lambda handler."""
-
-    def test_lambda_handler_success_basic(self, sample_ami_data, sample_eventbridge_event):
-        """Test successful Lambda execution with basic tagging."""
-        # Setup environment
-        os.environ['AMI_NAME_TEMPLATE'] = '{source_name}-encrypted-{date}'
-        os.environ['TAGS'] = json.dumps({'Environment': 'production'})
-        os.environ.pop('REDHAT_CREDENTIAL_STORE', None)
-
+    def test_copy_ami_with_uuid(self, sample_ami_data):
+        """Test AMI copy with UUID tag."""
         source_ami_id = 'ami-12345678'
-        sample_eventbridge_event['detail']['requestParameters']['imageId'] = source_ami_id
+        tags = {'Environment': 'test'}
+        uuid = 'a1b2c3d4-5678-90ab-cdef-1234567890ab'
 
-        # Mock EC2 client calls
         with patch('ami_copier.ec2_client') as mock_client:
             mock_client.describe_images.return_value = {
                 'Images': [sample_ami_data]
@@ -652,37 +811,155 @@ class TestLambdaHandler:
                 'ImageId': 'ami-copied123'
             }
 
-            response = ami_copier.lambda_handler(sample_eventbridge_event, None)
+            new_ami_id = ami_copier.copy_ami(source_ami_id, 'test-copy', tags, uuid)
+
+        # Verify UUID tag was added
+        assert mock_client.create_tags.called
+        tag_call = mock_client.create_tags.call_args
+        tags_list = tag_call[1]['Tags']
+        uuid_tags = [t for t in tags_list if t['Key'] == 'SourceAMIUUID']
+        assert len(uuid_tags) == 1
+        assert uuid_tags[0]['Value'] == uuid
+
+
+# Tests for lambda_handler()
+class TestLambdaHandler:
+    """Tests for the main Lambda handler."""
+
+    def test_lambda_handler_manual_mode_success(self, sample_ami_data, sample_manual_event):
+        """Test successful Lambda execution in manual mode."""
+        # Setup environment
+        os.environ['AMI_NAME_TEMPLATE'] = '{source_name}-{uuid}-encrypted'
+        os.environ['TAGS'] = json.dumps({'Environment': 'production'})
+        os.environ.pop('REDHAT_CREDENTIAL_STORE', None)
+
+        # Mock EC2 client calls - need to differentiate between source AMI lookup and dedup check
+        with patch('ami_copier.ec2_client') as mock_client:
+            def describe_images_side_effect(*args, **kwargs):
+                # Check if this is the deduplication check (Owners=['self'])
+                if kwargs.get('Owners') == ['self']:
+                    return {'Images': []}  # No existing copy
+                else:
+                    return {'Images': [sample_ami_data]}  # Source AMI exists
+
+            mock_client.describe_images.side_effect = describe_images_side_effect
+            mock_client.copy_image.return_value = {
+                'ImageId': 'ami-copied123'
+            }
+
+            response = ami_copier.lambda_handler(sample_manual_event, None)
 
         assert response['statusCode'] == 200
         body = json.loads(response['body'])
-        assert body['sourceAMI'] == source_ami_id
-        assert body['newAMI'] == 'ami-copied123'
-        assert 'rhel-9-base-encrypted' in body['name']
+        assert body['mode'] == 'manual'
+        assert body['result']['source_ami_id'] == 'ami-12345678'
+        assert body['result']['new_ami_id'] == 'ami-copied123'
+        assert body['result']['status'] == 'copied'
 
-    def test_lambda_handler_missing_ami_id(self, sample_eventbridge_event):
-        """Test Lambda handler with missing AMI ID in event."""
-        # Remove AMI ID from event
-        del sample_eventbridge_event['detail']['requestParameters']['imageId']
+    def test_lambda_handler_scheduled_mode_success(self, sample_redhat_ami_data, sample_scheduled_event):
+        """Test successful Lambda execution in scheduled mode."""
+        # Setup environment
+        os.environ['AMI_NAME_TEMPLATE'] = 'rhel-{uuid}-encrypted'
+        os.environ['TAGS'] = json.dumps({'Environment': 'production'})
 
-        response = ami_copier.lambda_handler(sample_eventbridge_event, None)
+        # Mock EC2 client calls
+        with patch('ami_copier.ec2_client') as mock_client:
+            def describe_images_side_effect(*args, **kwargs):
+                # Deduplication check
+                if kwargs.get('Owners') == ['self']:
+                    return {'Images': []}  # No existing copy
+                # Discovery or source AMI lookup
+                else:
+                    return {'Images': [sample_redhat_ami_data]}
 
-        assert response['statusCode'] == 400
+            mock_client.describe_images.side_effect = describe_images_side_effect
+            mock_client.copy_image.return_value = {
+                'ImageId': 'ami-newcopy123'
+            }
+
+            response = ami_copier.lambda_handler(sample_scheduled_event, None)
+
+        assert response['statusCode'] == 200
         body = json.loads(response['body'])
-        assert 'error' in body
+        assert body['mode'] == 'scheduled'
+        assert body['summary']['total'] == 1
+        assert body['summary']['copied'] == 1
+        assert len(body['results']) == 1
 
-    def test_lambda_handler_ami_not_found(self, sample_eventbridge_event):
-        """Test Lambda handler with non-existent AMI."""
-        os.environ['AMI_NAME_TEMPLATE'] = 'test-{date}'
+    def test_lambda_handler_scheduled_mode_no_amis(self, sample_scheduled_event):
+        """Test scheduled mode when no shared AMIs found."""
+        os.environ['AMI_NAME_TEMPLATE'] = 'rhel-{uuid}-encrypted'
+        os.environ['TAGS'] = '{}'
+
+        # Mock EC2 to return no AMIs
+        with patch('ami_copier.ec2_client') as mock_client:
+            mock_client.describe_images.return_value = {'Images': []}
+
+            response = ami_copier.lambda_handler(sample_scheduled_event, None)
+
+        assert response['statusCode'] == 200
+        body = json.loads(response['body'])
+        assert body['mode'] == 'scheduled'
+        assert body['message'] == 'No shared AMIs found'
+        assert body['results'] == []
+
+    def test_lambda_handler_scheduled_mode_with_deduplication(self, sample_redhat_ami_data, sample_scheduled_event):
+        """Test scheduled mode with deduplication (AMI already copied)."""
+        os.environ['AMI_NAME_TEMPLATE'] = 'rhel-{uuid}-encrypted'
+        os.environ['TAGS'] = '{}'
+
+        # Mock EC2 client
+        with patch('ami_copier.ec2_client') as mock_client:
+            # Discovery returns one AMI
+            call_count = [0]
+
+            def describe_images_side_effect(*args, **kwargs):
+                call_count[0] += 1
+                if call_count[0] == 1:
+                    # First call: discover shared AMIs
+                    return {'Images': [sample_redhat_ami_data]}
+                elif call_count[0] == 2:
+                    # Second call: process_ami gets source AMI details
+                    return {'Images': [sample_redhat_ami_data]}
+                else:
+                    # Third call: ami_already_copied check - AMI exists
+                    return {'Images': [{'ImageId': 'ami-existing', 'Name': 'rhel-test-encrypted'}]}
+
+            mock_client.describe_images.side_effect = describe_images_side_effect
+
+            response = ami_copier.lambda_handler(sample_scheduled_event, None)
+
+        assert response['statusCode'] == 200
+        body = json.loads(response['body'])
+        assert body['summary']['total'] == 1
+        assert body['summary']['skipped'] == 1
+        assert body['summary']['copied'] == 0
+        assert body['results'][0]['status'] == 'skipped'
+
+    def test_lambda_handler_manual_mode_ami_not_found(self, sample_manual_event):
+        """Test manual mode when AMI not found."""
+        os.environ['AMI_NAME_TEMPLATE'] = 'test-{uuid}'
         os.environ['TAGS'] = '{}'
 
         # Mock EC2 to return empty images
         with patch('ami_copier.ec2_client') as mock_client:
             mock_client.describe_images.return_value = {'Images': []}
 
-            response = ami_copier.lambda_handler(sample_eventbridge_event, None)
+            response = ami_copier.lambda_handler(sample_manual_event, None)
 
-        assert response['statusCode'] == 404
+        assert response['statusCode'] == 400
+        body = json.loads(response['body'])
+        assert body['result']['status'] == 'error'
+        assert 'not found' in body['result']['message'].lower()
+
+    def test_lambda_handler_exception_handling(self, sample_scheduled_event):
+        """Test Lambda handler exception handling."""
+        os.environ['AMI_NAME_TEMPLATE'] = 'test'
+        os.environ['TAGS'] = 'invalid-json'  # Invalid JSON to trigger exception
+
+        response = ami_copier.lambda_handler(sample_scheduled_event, None)
+
+        assert response['statusCode'] == 500
         body = json.loads(response['body'])
         assert 'error' in body
 
@@ -696,16 +973,16 @@ class TestLambdaHandler:
         mock_find_compose,
         mock_get_token,
         mock_get_creds,
-        sample_ami_data,
-        sample_eventbridge_event
+        sample_redhat_ami_data,
+        sample_manual_event
     ):
         """Test Lambda handler with Red Hat API tag enrichment."""
         # Setup environment
-        os.environ['AMI_NAME_TEMPLATE'] = '{source_name}-encrypted'
+        os.environ['AMI_NAME_TEMPLATE'] = 'rhel-{uuid}-encrypted'
         os.environ['TAGS'] = json.dumps({'Environment': 'production'})
 
-        source_ami_id = 'ami-12345678'
-        sample_eventbridge_event['detail']['requestParameters']['imageId'] = source_ami_id
+        # Use Red Hat AMI in manual event
+        sample_manual_event['source_ami_id'] = 'ami-redhat123'
 
         # Mock Red Hat API integration
         mock_get_creds.return_value = {
@@ -729,28 +1006,23 @@ class TestLambdaHandler:
 
         # Mock EC2 client
         with patch('ami_copier.ec2_client') as mock_client:
-            mock_client.describe_images.return_value = {
-                'Images': [sample_ami_data]
-            }
+            def describe_images_side_effect(*args, **kwargs):
+                # Deduplication check
+                if kwargs.get('Owners') == ['self']:
+                    return {'Images': []}  # No existing copy
+                # Source AMI lookup
+                else:
+                    return {'Images': [sample_redhat_ami_data]}
+
+            mock_client.describe_images.side_effect = describe_images_side_effect
             mock_client.copy_image.return_value = {
                 'ImageId': 'ami-copied123'
             }
 
-            response = ami_copier.lambda_handler(sample_eventbridge_event, None)
+            response = ami_copier.lambda_handler(sample_manual_event, None)
 
         assert response['statusCode'] == 200
         assert mock_get_creds.called
         assert mock_get_token.called
         assert mock_find_compose.called
         assert mock_get_metadata.called
-
-    def test_lambda_handler_exception(self, sample_eventbridge_event):
-        """Test Lambda handler exception handling."""
-        os.environ['AMI_NAME_TEMPLATE'] = 'test'
-        os.environ['TAGS'] = 'invalid-json'  # Invalid JSON to trigger exception
-
-        response = ami_copier.lambda_handler(sample_eventbridge_event, None)
-
-        assert response['statusCode'] == 500
-        body = json.loads(response['body'])
-        assert 'error' in body

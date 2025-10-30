@@ -140,12 +140,12 @@ resource "aws_iam_role_policy" "lambda" {
 resource "aws_lambda_function" "ami_copier" {
   filename         = data.archive_file.lambda.output_path
   function_name    = local.lambda_function_name
-  role            = aws_iam_role.lambda.arn
-  handler         = "ami_copier.lambda_handler"
+  role             = aws_iam_role.lambda.arn
+  handler          = "ami_copier.lambda_handler"
   source_code_hash = data.archive_file.lambda.output_base64sha256
-  runtime         = "python3.12"
-  timeout         = var.lambda_timeout
-  memory_size     = var.lambda_memory_size
+  runtime          = "python3.12"
+  timeout          = var.lambda_timeout
+  memory_size      = var.lambda_memory_size
 
   environment {
     variables = merge(
@@ -174,36 +174,18 @@ resource "aws_lambda_function" "ami_copier" {
   tags = var.tags
 }
 
-# EventBridge Rule to detect AMI sharing
-resource "aws_cloudwatch_event_rule" "ami_shared" {
-  name        = "${var.name_prefix}-ami-shared"
-  description = "Trigger when an AMI is shared with this account"
-
-  event_pattern = jsonencode({
-    source      = ["aws.ec2"]
-    detail-type = ["AWS API Call via CloudTrail"]
-    detail = {
-      eventName = ["ModifyImageAttribute"]
-      requestParameters = {
-        launchPermission = {
-          add = {
-            items = [
-              {
-                userId = [data.aws_caller_identity.current.account_id]
-              }
-            ]
-          }
-        }
-      }
-    }
-  })
+# EventBridge Scheduled Rule for AMI discovery
+resource "aws_cloudwatch_event_rule" "ami_discovery" {
+  name                = "${var.name_prefix}-ami-discovery"
+  description         = "Scheduled rule to discover and copy shared Red Hat AMIs"
+  schedule_expression = var.schedule_expression
 
   tags = var.tags
 }
 
 # EventBridge Target - Lambda
 resource "aws_cloudwatch_event_target" "lambda" {
-  rule      = aws_cloudwatch_event_rule.ami_shared.name
+  rule      = aws_cloudwatch_event_rule.ami_discovery.name
   target_id = "InvokeLambda"
   arn       = aws_lambda_function.ami_copier.arn
 }
@@ -214,7 +196,7 @@ resource "aws_lambda_permission" "eventbridge" {
   action        = "lambda:InvokeFunction"
   function_name = aws_lambda_function.ami_copier.function_name
   principal     = "events.amazonaws.com"
-  source_arn    = aws_cloudwatch_event_rule.ami_shared.arn
+  source_arn    = aws_cloudwatch_event_rule.ami_discovery.arn
 }
 
 # Data source for current AWS account
