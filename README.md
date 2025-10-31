@@ -16,24 +16,64 @@ Red Hat Image Builder produces AMIs with unencrypted gp2 root volumes. This modu
 
 ## Architecture
 
+### Core Flow
+
+```mermaid
+graph LR
+    EB[EventBridge<br/>Scheduled Rule<br/>every 12h]
+    Lambda[Lambda Function<br/>ami_copier.py]
+    Source[Red Hat AMIs<br/>gp2 unencrypted]
+    Target[Copied AMIs<br/>gp3 encrypted]
+
+    EB -->|Trigger| Lambda
+    Lambda -->|1. Discover| Source
+    Lambda -->|2. Check exists| Target
+    Lambda -->|3. Copy| Target
+
+    style Lambda fill:#FF9900,stroke:#232F3E,color:#fff,stroke-width:3px
+    style EB fill:#E7157B,stroke:#232F3E,color:#fff
+    style Source fill:#527FFF,stroke:#232F3E,color:#fff
+    style Target fill:#7AA116,stroke:#232F3E,color:#fff
 ```
-EventBridge Scheduled Rule (every 12h)
-            |
-            v
-     Lambda Function
-            |
-            v
-  Discover Red Hat shared AMIs
-            |
-            v
-  Check if already copied (deduplication)
-            |
-            v
-    Copy new AMIs with gp3 + encryption
-            |
-            v
-    Tagged encrypted AMI
+
+### With Optional Red Hat API Integration
+
+```mermaid
+graph LR
+    EB[EventBridge<br/>Scheduled Rule]
+    Lambda[Lambda Function]
+    Creds[SSM / Secrets<br/>Manager]
+    RHSSO[Red Hat SSO]
+    RHAPI[Image Builder<br/>API]
+    Source[Red Hat AMIs]
+    Target[Copied AMIs<br/>+ Metadata Tags]
+
+    EB -->|Trigger| Lambda
+    Lambda -->|Discover| Source
+    Lambda -.->|Get credentials| Creds
+    Lambda -.->|Authenticate| RHSSO
+    RHSSO -.->|Token| Lambda
+    Lambda -.->|Query metadata| RHAPI
+    Lambda -->|Copy + Enrich| Target
+
+    style Lambda fill:#FF9900,stroke:#232F3E,color:#fff,stroke-width:3px
+    style EB fill:#E7157B,stroke:#232F3E,color:#fff
+    style Source fill:#527FFF,stroke:#232F3E,color:#fff
+    style Target fill:#7AA116,stroke:#232F3E,color:#fff
+    style RHSSO fill:#EE0000,stroke:#232F3E,color:#fff
+    style RHAPI fill:#EE0000,stroke:#232F3E,color:#fff
+    style Creds fill:#DD344C,stroke:#232F3E,color:#fff
 ```
+
+**Key Components:**
+
+- **EventBridge Scheduled Rule**: Triggers Lambda every 12 hours (configurable)
+- **Lambda Function**: Polls for Red Hat AMIs, performs deduplication, and copies with encryption
+- **Red Hat AMIs**: Source AMIs shared by Red Hat (Owner: 463606842039) with gp2 unencrypted volumes
+- **Copied AMIs**: Target AMIs with gp3 encrypted volumes, custom naming, and automatic tagging
+- **SSM/Secrets Manager** _(Optional)_: Stores Red Hat API credentials for metadata enrichment
+- **Red Hat SSO** _(Optional)_: OAuth2 authentication for API access
+- **Image Builder API** _(Optional)_: Provides compose metadata for enhanced tagging
 
 **Why polling instead of events?**
 
