@@ -5,6 +5,15 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.1.5](https://github.com/PodioSpaz/ami-copier/compare/v0.1.4...v0.1.5) (2025-10-31)
+
+
+### Documentation
+
+* add comprehensive Mermaid architecture diagram ([037dbb5](https://github.com/PodioSpaz/ami-copier/commit/037dbb57c6a21ae4cf5a30da4ca7599242fcbb22))
+* add Mermaid architecture diagrams to README ([db957fc](https://github.com/PodioSpaz/ami-copier/commit/db957fc9131c9fd89e48059aba8de433467bc0c2))
+* improve diagram layout for better readability ([924fd13](https://github.com/PodioSpaz/ami-copier/commit/924fd13ae043faa96529ef30e8d9a5a9b0741953))
+
 ## [0.1.4](https://github.com/PodioSpaz/ami-copier/compare/v0.1.3...v0.1.4) (2025-10-30)
 
 
