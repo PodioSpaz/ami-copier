@@ -20,7 +20,7 @@ module "ami_copier" {
   source = "../.." # Local path for testing
 
   name_prefix       = "rhel"
-  ami_name_template = "rhel-{uuid}-encrypted-gp3"  # UUID ensures uniqueness
+  ami_name_template = "rhel-{uuid}-encrypted-gp3" # UUID ensures uniqueness
 
   # Optional: Customize polling schedule (default: rate(12 hours))
   # schedule_expression = "rate(6 hours)"  # Run every 6 hours

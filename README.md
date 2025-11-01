@@ -262,6 +262,92 @@ module "ami_copier" {
 }
 ```
 
+#### Using Existing Secrets/Parameters
+
+For organizations with security policies that restrict storing sensitive credentials in Terraform state, you can reference existing AWS Secrets Manager secrets or SSM parameters instead of having the module create them.
+
+**Benefits:**
+- Keeps credentials completely out of Terraform state
+- Allows credential rotation without Terraform changes
+- Supports centralized secret management
+- Maintains backward compatibility
+
+**Using Existing SSM Parameters:**
+
+```hcl
+# First, create the SSM parameters outside of this module
+# (e.g., via AWS Console, AWS CLI, or separate Terraform state)
+#
+# aws ssm put-parameter \
+#   --name /my-org/redhat/client-id \
+#   --type SecureString \
+#   --value "your-client-id"
+#
+# aws ssm put-parameter \
+#   --name /my-org/redhat/client-secret \
+#   --type SecureString \
+#   --value "your-client-secret"
+
+module "ami_copier" {
+  source = "./ami-copier"
+
+  name_prefix       = "rhel9"
+  ami_name_template = "rhel-9-encrypted-{date}"
+
+  enable_redhat_api        = true
+  redhat_credential_store  = "ssm"
+
+  # Reference existing SSM parameters (provide either name or ARN)
+  existing_redhat_client_id_param_name     = "/my-org/redhat/client-id"
+  existing_redhat_client_secret_param_name = "/my-org/redhat/client-secret"
+
+  tags = {
+    Environment = "production"
+  }
+}
+```
+
+**Using Existing Secrets Manager Secret:**
+
+```hcl
+# First, create the secret outside of this module
+# The secret must contain JSON with service account credentials:
+# {
+#   "client_id": "your-client-id",
+#   "client_secret": "your-client-secret"
+# }
+#
+# Or for legacy offline token:
+# {
+#   "offline_token": "your-token"
+# }
+
+module "ami_copier" {
+  source = "./ami-copier"
+
+  name_prefix       = "rhel9"
+  ami_name_template = "rhel-9-encrypted-{date}"
+
+  enable_redhat_api        = true
+  redhat_credential_store  = "secretsmanager"
+
+  # Reference existing secret (provide either name or ARN)
+  existing_redhat_secret_name = "my-org/redhat-api-credentials"
+  # OR
+  # existing_redhat_secret_arn = "arn:aws:secretsmanager:us-east-1:123456789:secret:my-secret"
+
+  tags = {
+    Environment = "production"
+  }
+}
+```
+
+**Important Notes:**
+- When using existing resources, DO NOT provide `redhat_client_id`, `redhat_client_secret`, or `redhat_offline_token` variables
+- The module will grant Lambda IAM permissions to access the existing secret/parameters
+- For SSM, you can provide either parameter name or ARN (or both)
+- For Secrets Manager, you can provide either secret name or ARN (or both)
+
 #### Legacy: Offline Token Authentication (Deprecated)
 
 For backward compatibility, offline token authentication is still supported:
@@ -417,9 +503,15 @@ Releases are fully automated:
 | schedule_expression | EventBridge schedule expression (e.g., 'rate(12 hours)', 'cron(0 */12 * * ? *)') | string | "rate(12 hours)" | no |
 | enable_redhat_api | Enable Red Hat Image Builder API integration for enhanced tagging | bool | false | no |
 | redhat_credential_store | Credential storage: 'ssm' (Parameter Store) or 'secretsmanager' (Secrets Manager) | string | "ssm" | no |
-| redhat_client_id | Red Hat Service Account Client ID (required if enable_redhat_api=true) | string (sensitive) | "" | no |
-| redhat_client_secret | Red Hat Service Account Client Secret (required if enable_redhat_api=true) | string (sensitive) | "" | no |
+| redhat_client_id | Red Hat Service Account Client ID (required if enable_redhat_api=true and not using existing secrets) | string (sensitive) | "" | no |
+| redhat_client_secret | Red Hat Service Account Client Secret (required if enable_redhat_api=true and not using existing secrets) | string (sensitive) | "" | no |
 | redhat_offline_token | [DEPRECATED] Red Hat offline token for legacy authentication | string (sensitive) | "" | no |
+| existing_redhat_secret_arn | ARN of existing Secrets Manager secret containing Red Hat credentials (optional, keeps credentials out of Terraform state) | string | "" | no |
+| existing_redhat_secret_name | Name of existing Secrets Manager secret containing Red Hat credentials (optional, keeps credentials out of Terraform state) | string | "" | no |
+| existing_redhat_client_id_param_arn | ARN of existing SSM parameter containing Red Hat client ID (optional, keeps credentials out of Terraform state) | string | "" | no |
+| existing_redhat_client_id_param_name | Name of existing SSM parameter containing Red Hat client ID (optional, keeps credentials out of Terraform state) | string | "" | no |
+| existing_redhat_client_secret_param_arn | ARN of existing SSM parameter containing Red Hat client secret (optional, keeps credentials out of Terraform state) | string | "" | no |
+| existing_redhat_client_secret_param_name | Name of existing SSM parameter containing Red Hat client secret (optional, keeps credentials out of Terraform state) | string | "" | no |
 
 ## Outputs
 
