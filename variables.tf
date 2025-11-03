@@ -140,3 +140,109 @@ variable "redhat_offline_token" {
   default     = ""
   sensitive   = true
 }
+
+# Variables for using existing secrets/parameters instead of creating new ones
+
+variable "existing_redhat_secret_arn" {
+  description = <<-EOT
+    ARN of an existing AWS Secrets Manager secret containing Red Hat credentials.
+    If provided, the module will use this secret instead of creating a new one.
+
+    The secret must contain JSON with either:
+    - Service account: {"client_id": "...", "client_secret": "..."}
+    - Legacy offline token: {"offline_token": "..."}
+
+    Use this to keep credentials out of Terraform state. Only applicable when
+    redhat_credential_store = "secretsmanager".
+
+    Note: Provide either existing_redhat_secret_arn OR existing_redhat_secret_name, not both.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "existing_redhat_secret_name" {
+  description = <<-EOT
+    Name of an existing AWS Secrets Manager secret containing Red Hat credentials.
+    If provided, the module will use this secret instead of creating a new one.
+
+    The secret must contain JSON with either:
+    - Service account: {"client_id": "...", "client_secret": "..."}
+    - Legacy offline token: {"offline_token": "..."}
+
+    Use this to keep credentials out of Terraform state. Only applicable when
+    redhat_credential_store = "secretsmanager".
+
+    Note: Provide either existing_redhat_secret_arn OR existing_redhat_secret_name, not both.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "existing_redhat_client_id_param_arn" {
+  description = <<-EOT
+    ARN of an existing SSM Parameter Store parameter containing the Red Hat Service Account Client ID.
+    If provided, the module will use this parameter instead of creating a new one.
+
+    The parameter should be type SecureString and contain the client_id value.
+
+    Use this to keep credentials out of Terraform state. Only applicable when
+    redhat_credential_store = "ssm".
+
+    Note: Provide either existing_redhat_client_id_param_arn OR existing_redhat_client_id_param_name, not both.
+    Must also provide corresponding client_secret parameter reference.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "existing_redhat_client_id_param_name" {
+  description = <<-EOT
+    Name of an existing SSM Parameter Store parameter containing the Red Hat Service Account Client ID.
+    If provided, the module will use this parameter instead of creating a new one.
+
+    The parameter should be type SecureString and contain the client_id value.
+
+    Use this to keep credentials out of Terraform state. Only applicable when
+    redhat_credential_store = "ssm".
+
+    Note: Provide either existing_redhat_client_id_param_arn OR existing_redhat_client_id_param_name, not both.
+    Must also provide corresponding client_secret parameter reference.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "existing_redhat_client_secret_param_arn" {
+  description = <<-EOT
+    ARN of an existing SSM Parameter Store parameter containing the Red Hat Service Account Client Secret.
+    If provided, the module will use this parameter instead of creating a new one.
+
+    The parameter should be type SecureString and contain the client_secret value.
+
+    Use this to keep credentials out of Terraform state. Only applicable when
+    redhat_credential_store = "ssm".
+
+    Note: Provide either existing_redhat_client_secret_param_arn OR existing_redhat_client_secret_param_name, not both.
+    Must also provide corresponding client_id parameter reference.
+  EOT
+  type        = string
+  default     = ""
+}
+
+variable "existing_redhat_client_secret_param_name" {
+  description = <<-EOT
+    Name of an existing SSM Parameter Store parameter containing the Red Hat Service Account Client Secret.
+    If provided, the module will use this parameter instead of creating a new one.
+
+    The parameter should be type SecureString and contain the client_secret value.
+
+    Use this to keep credentials out of Terraform state. Only applicable when
+    redhat_credential_store = "ssm".
+
+    Note: Provide either existing_redhat_client_secret_param_arn OR existing_redhat_client_secret_param_name, not both.
+    Must also provide corresponding client_id parameter reference.
+  EOT
+  type        = string
+  default     = ""
+}

@@ -189,6 +189,66 @@ Tags are enriched with:
 - Lambda IAM policy grants `secretsmanager:GetSecretValue` permission
 - Better for organizations already using Secrets Manager
 
+**Using Existing Secrets/Parameters** (New in v0.2.0):
+
+To keep credentials out of Terraform state, the module supports referencing existing AWS Secrets Manager secrets or SSM parameters instead of creating new ones.
+
+*Implementation Details*:
+
+**Variables** (`variables.tf:144-248`):
+- `existing_redhat_secret_arn` / `existing_redhat_secret_name` - For Secrets Manager
+- `existing_redhat_client_id_param_arn` / `existing_redhat_client_id_param_name` - For SSM client ID
+- `existing_redhat_client_secret_param_arn` / `existing_redhat_client_secret_param_name` - For SSM client secret
+- Users can provide either ARN or name (or both) for flexibility
+
+**Data Sources** (`main.tf:64-95`):
+- `data.aws_secretsmanager_secret.existing_redhat_by_name` - Looks up secret by name
+- `data.aws_secretsmanager_secret.existing_redhat_by_arn` - Looks up secret by ARN
+- `data.aws_ssm_parameter.existing_client_id` - Looks up client ID parameter (extracts name from ARN if needed)
+- `data.aws_ssm_parameter.existing_client_secret` - Looks up client secret parameter (extracts name from ARN if needed)
+- Data sources only created when external references are provided
+
+**Resource Resolution** (`main.tf:6-54`):
+Locals determine which resource to use (priority order):
+1. `local.using_existing_secret` / `local.using_existing_ssm` - Flags indicating external references
+2. `local.redhat_secret_arn` / `local.redhat_secret_name` - Resolve to either external, data source, or created resource
+3. `local.client_id_param_arn` / `local.client_id_param_name` - Same pattern for SSM parameters
+4. `local.client_secret_param_arn` / `local.client_secret_param_name`
+
+**Resource Creation Skipping** (`main.tf:104-148`):
+- SSM parameters: Only create when `!local.using_existing_ssm`
+- Secrets Manager: Only create when `!local.using_existing_secret`
+- Prevents conflicts and duplicate resources
+
+**Lambda Integration** (`main.tf:242-248`):
+- Environment variables use locals instead of direct resource references
+- `CLIENT_ID_PARAM = local.client_id_param_name` (works for both created and existing)
+- `CLIENT_SECRET_PARAM = local.client_secret_param_name`
+- `REDHAT_SECRET_NAME = local.redhat_secret_name`
+- No Lambda code changes needed - function already uses env vars generically
+
+**IAM Permissions** (`main.tf:204-217`):
+- IAM policy uses locals for ARNs: `local.client_id_param_arn`, `local.client_secret_param_arn`, `local.redhat_secret_arn`
+- Grants access to external resources just like created resources
+- Works seamlessly whether resources are created or external
+
+**Validation** (`validation.tf`):
+Comprehensive validation ensures:
+- Can't provide both ARN and name for the same resource
+- When using SSM, must provide both client_id and client_secret references
+- When `enable_redhat_api=true`, must provide credentials via one method (inline OR external)
+- Can't mix inline credentials with external references
+- External Secrets Manager references require `redhat_credential_store="secretsmanager"`
+- External SSM references require `redhat_credential_store="ssm"`
+- External references require `enable_redhat_api=true`
+
+**Benefits**:
+- Credentials never stored in Terraform state
+- Supports credential rotation without Terraform changes
+- Compatible with centralized secret management
+- Maintains full backward compatibility
+- Supports both Secrets Manager and SSM Parameter Store
+
 ## Module Usage Pattern
 
 This module is designed to be instantiated multiple times for different RHEL versions:
