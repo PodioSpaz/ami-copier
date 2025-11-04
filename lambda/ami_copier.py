@@ -23,15 +23,15 @@ ssm_client = boto3.client('ssm')
 REDHAT_ACCOUNT_ID = '463606842039'
 
 
-def get_block_device_mappings(source_ami_id: str) -> List[Dict[str, Any]]:
+def get_source_ami_details(source_ami_id: str) -> Dict[str, Any]:
     """
-    Get block device mappings from source AMI and convert gp2 to gp3.
+    Get source AMI details.
 
     Args:
         source_ami_id: The source AMI ID
 
     Returns:
-        List of modified block device mappings
+        Source AMI metadata
     """
     try:
         response = ec2_client.describe_images(ImageIds=[source_ami_id])
@@ -39,38 +39,47 @@ def get_block_device_mappings(source_ami_id: str) -> List[Dict[str, Any]]:
         if not response['Images']:
             raise ValueError(f"AMI {source_ami_id} not found")
 
-        source_image = response['Images'][0]
-        block_device_mappings = source_image.get('BlockDeviceMappings', [])
-
-        # Convert gp2 to gp3 in block device mappings
-        modified_mappings = []
-        for mapping in block_device_mappings:
-            if 'Ebs' in mapping:
-                ebs = mapping['Ebs'].copy()
-
-                # Change gp2 to gp3
-                if ebs.get('VolumeType') == 'gp2':
-                    ebs['VolumeType'] = 'gp3'
-                    logger.info(f"Converting volume type from gp2 to gp3 for device {mapping['DeviceName']}")
-
-                # Remove SnapshotId as it will be copied from source
-                ebs.pop('SnapshotId', None)
-                # Remove Encrypted as we'll set it at the top level
-                ebs.pop('Encrypted', None)
-
-                modified_mappings.append({
-                    'DeviceName': mapping['DeviceName'],
-                    'Ebs': ebs
-                })
-            else:
-                # Keep non-EBS mappings as-is
-                modified_mappings.append(mapping)
-
-        return modified_mappings, source_image
+        return response['Images'][0]
 
     except ClientError as e:
         logger.error(f"Error describing AMI {source_ami_id}: {e}")
         raise
+
+
+def build_block_device_mappings_for_registration(block_device_mappings: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """
+    Build block device mappings for AMI registration with gp2->gp3 conversion.
+
+    This function takes block device mappings from an existing AMI and modifies them
+    for re-registration, converting gp2 volumes to gp3.
+
+    Args:
+        block_device_mappings: Original block device mappings from copied AMI
+
+    Returns:
+        List of modified block device mappings for register_image()
+    """
+    modified_mappings = []
+
+    for mapping in block_device_mappings:
+        if 'Ebs' in mapping:
+            ebs = mapping['Ebs'].copy()
+
+            # Change gp2 to gp3
+            original_type = ebs.get('VolumeType', 'gp2')
+            if original_type == 'gp2':
+                ebs['VolumeType'] = 'gp3'
+                logger.info(f"Converting volume type from gp2 to gp3 for device {mapping['DeviceName']}")
+
+            modified_mappings.append({
+                'DeviceName': mapping['DeviceName'],
+                'Ebs': ebs
+            })
+        else:
+            # Keep non-EBS mappings as-is
+            modified_mappings.append(mapping)
+
+    return modified_mappings
 
 
 def get_redhat_credentials() -> Optional[Dict[str, str]]:
@@ -444,7 +453,13 @@ def ami_already_copied(ami_name: str) -> bool:
 
 def copy_ami(source_ami_id: str, ami_name: str, tags: Dict[str, str], uuid: Optional[str] = None) -> str:
     """
-    Copy AMI with encryption and gp3 volumes.
+    Copy AMI with encryption and gp3 volumes using a two-step process.
+
+    Step 1: Copy the AMI with encryption (creates encrypted snapshots)
+    Step 2: Re-register the AMI with modified block device mappings (gp2->gp3)
+
+    This two-step approach is necessary because the EC2 copy_image() API does not
+    accept the BlockDeviceMappings parameter.
 
     Args:
         source_ami_id: Source AMI ID to copy
@@ -453,28 +468,83 @@ def copy_ami(source_ami_id: str, ami_name: str, tags: Dict[str, str], uuid: Opti
         uuid: Optional UUID extracted from source AMI name
 
     Returns:
-        The new AMI ID
+        The final AMI ID with gp3 volumes
     """
+    temp_ami_id = None
     try:
-        # Get source AMI details and modify block device mappings
-        block_device_mappings, source_image = get_block_device_mappings(source_ami_id)
+        # Get source AMI details
+        source_image = get_source_ami_details(source_ami_id)
 
-        logger.info(f"Copying AMI {source_ami_id} as {ami_name}")
+        logger.info(f"Starting two-step AMI copy process for {source_ami_id}")
+        logger.info(f"Step 1: Copying AMI with encryption (temporary copy)")
 
-        # Copy the AMI with encryption enabled
+        # Step 1: Copy the AMI with encryption (no BlockDeviceMappings parameter)
+        temp_ami_name = f"{ami_name}-temp-{int(datetime.utcnow().timestamp())}"
         response = ec2_client.copy_image(
-            Name=ami_name,
+            Name=temp_ami_name,
             SourceImageId=source_ami_id,
             SourceRegion=os.environ['AWS_REGION'],
             Encrypted=True,  # Enable encryption with default AWS managed key
-            Description=f"Encrypted gp3 copy of {source_image.get('Description', source_ami_id)}",
-            BlockDeviceMappings=block_device_mappings
+            Description=f"Temporary encrypted copy of {source_image.get('Description', source_ami_id)}"
         )
 
-        new_ami_id = response['ImageId']
-        logger.info(f"Started AMI copy. New AMI ID: {new_ami_id}")
+        temp_ami_id = response['ImageId']
+        logger.info(f"Temporary AMI created: {temp_ami_id}. Waiting for copy to complete...")
 
-        # Tag the new AMI
+        # Step 2: Wait for the temporary AMI to become available
+        waiter = ec2_client.get_waiter('image_available')
+        waiter.wait(
+            ImageIds=[temp_ami_id],
+            WaiterConfig={
+                'Delay': 30,  # Check every 30 seconds
+                'MaxAttempts': 60  # 30 minutes maximum (60 * 30s = 1800s)
+            }
+        )
+        logger.info(f"Temporary AMI {temp_ami_id} is now available")
+
+        # Step 3: Get the temporary AMI's details
+        temp_image = get_source_ami_details(temp_ami_id)
+
+        # Build modified block device mappings with gp3
+        original_mappings = temp_image.get('BlockDeviceMappings', [])
+        modified_mappings = build_block_device_mappings_for_registration(original_mappings)
+
+        logger.info(f"Step 2: Deregistering temporary AMI and re-registering with gp3 volumes")
+
+        # Step 4: Deregister the temporary AMI (snapshots are retained)
+        ec2_client.deregister_image(ImageId=temp_ami_id)
+        logger.info(f"Deregistered temporary AMI {temp_ami_id} (snapshots retained)")
+
+        # Step 5: Re-register the AMI with modified block device mappings
+        # Preserve all important attributes from the source/temporary AMI
+        register_params = {
+            'Name': ami_name,
+            'Description': f"Encrypted gp3 copy of {source_image.get('Description', source_ami_id)}",
+            'Architecture': temp_image['Architecture'],
+            'RootDeviceName': temp_image['RootDeviceName'],
+            'BlockDeviceMappings': modified_mappings,
+            'VirtualizationType': temp_image.get('VirtualizationType', 'hvm'),
+        }
+
+        # Add optional attributes if present
+        if temp_image.get('EnaSupport'):
+            register_params['EnaSupport'] = True
+        if temp_image.get('SriovNetSupport'):
+            register_params['SriovNetSupport'] = temp_image['SriovNetSupport']
+        if temp_image.get('BootMode'):
+            register_params['BootMode'] = temp_image['BootMode']
+        if temp_image.get('TpmSupport'):
+            register_params['TpmSupport'] = temp_image['TpmSupport']
+        if temp_image.get('UefiData'):
+            register_params['UefiData'] = temp_image['UefiData']
+        if temp_image.get('ImdsSupport'):
+            register_params['ImdsSupport'] = temp_image['ImdsSupport']
+
+        register_response = ec2_client.register_image(**register_params)
+        final_ami_id = register_response['ImageId']
+        logger.info(f"Re-registered AMI with gp3 volumes: {final_ami_id}")
+
+        # Step 6: Tag the final AMI
         if tags:
             # Add source AMI ID and metadata to tags for tracking
             all_tags = tags.copy()
@@ -489,19 +559,24 @@ def copy_ami(source_ami_id: str, ami_name: str, tags: Dict[str, str], uuid: Opti
             tag_list = [{'Key': k, 'Value': v} for k, v in all_tags.items()]
 
             ec2_client.create_tags(
-                Resources=[new_ami_id],
+                Resources=[final_ami_id],
                 Tags=tag_list
             )
-            logger.info(f"Applied tags to AMI {new_ami_id}")
+            logger.info(f"Applied tags to final AMI {final_ami_id}")
 
-            # Wait for the AMI to become available so we can tag the snapshots
-            # Note: We do this asynchronously - the Lambda will complete before the AMI is ready
-            # But we can tag the AMI itself immediately
-
-        return new_ami_id
+        logger.info(f"Successfully completed two-step copy: {source_ami_id} -> {final_ami_id}")
+        return final_ami_id
 
     except ClientError as e:
         logger.error(f"Error copying AMI {source_ami_id}: {e}")
+        # If we created a temporary AMI and failed, try to clean it up
+        if temp_ami_id:
+            try:
+                logger.info(f"Attempting to clean up temporary AMI {temp_ami_id}")
+                ec2_client.deregister_image(ImageId=temp_ami_id)
+                logger.info(f"Cleaned up temporary AMI {temp_ami_id}")
+            except Exception as cleanup_error:
+                logger.error(f"Failed to clean up temporary AMI {temp_ami_id}: {cleanup_error}")
         raise
 
 

@@ -22,8 +22,8 @@ The Lambda function:
 - Queries `DescribeImages` with owner filter `463606842039` (Red Hat's AWS account ID)
 - Extracts UUID from AMI name pattern: `composer-api-{uuid}`
 - Checks if AMI already copied (deduplication by name)
-- Modifies block device mappings (gp2→gp3)
-- Initiates an encrypted AMI copy using `ec2:CopyImage`
+- Copies AMI with encryption using `ec2:CopyImage`
+- Re-registers AMI with modified block device mappings (gp2→gp3) using `ec2:RegisterImage` and `ec2:DeregisterImage`
 
 ## Development Commands
 
@@ -116,14 +116,27 @@ Configuration is passed to the Lambda function via environment variables:
 - `AMI_NAME_TEMPLATE` - Template string with placeholders: `{source_name}`, `{uuid}`, `{date}`, `{timestamp}`
 - `TAGS` - JSON-encoded map of tags to apply to copied AMIs
 
-### Block Device Mapping Transformation
+### Block Device Mapping Transformation (Two-Step Process)
 
-The Lambda function (`ami_copier.py:18-61`) retrieves the source AMI's block device mappings and:
-1. Changes all `gp2` volumes to `gp3`
-2. Removes `SnapshotId` (will be copied from source)
-3. Removes `Encrypted` flag (set at top level in CopyImage call)
+The Lambda function uses a **two-step process** to copy AMIs with gp2→gp3 conversion:
 
-The actual AMI copy operation uses `Encrypted=True` which applies AWS-managed encryption (`aws/ebs` key) to all volumes.
+**Why two steps?**
+The AWS `copy_image()` API does not accept the `BlockDeviceMappings` parameter. Volume type changes must be applied during AMI registration, not during copy.
+
+**Step 1: Encrypted Copy** (`ami_copier.py:481-492`)
+- Calls `copy_image()` with `Encrypted=True` (no BlockDeviceMappings)
+- Creates encrypted snapshots with AWS-managed encryption (`aws/ebs` key)
+- Generates temporary AMI name with timestamp suffix
+
+**Step 2: Re-register with gp3** (`ami_copier.py:494-545`)
+- Waits for temporary AMI to become available (up to 30 minutes)
+- Retrieves temporary AMI's block device mappings and snapshots
+- Modifies mappings to convert gp2→gp3 (`build_block_device_mappings_for_registration()`)
+- Deregisters temporary AMI (snapshots are retained)
+- Re-registers AMI using `register_image()` with modified mappings
+- Preserves all AMI attributes: Architecture, RootDeviceName, VirtualizationType, EnaSupport, SriovNetSupport, BootMode, TpmSupport, UefiData, ImdsSupport
+
+The final AMI references the encrypted snapshots from Step 1 with gp3 volume types applied in the block device mappings.
 
 ### Automatic Tagging
 
@@ -283,8 +296,8 @@ Each instance creates its own Lambda function and EventBridge rule. The `name_pr
 - Check CloudWatch Logs: `/aws/lambda/${name_prefix}-ami-copier`
 - Common issues:
   - Source AMI not accessible (wrong region, permissions)
-  - Lambda timeout (increase `lambda_timeout` variable for large AMIs or when using API integration)
-  - IAM permission errors (check inline policy in `main.tf:61-98`)
+  - Lambda timeout - The two-step copy process waits up to 30 minutes for AMI copy to complete. Increase `lambda_timeout` variable if needed (default: 900 seconds, recommended minimum for large AMIs or API integration: 600-900 seconds)
+  - IAM permission errors - Verify Lambda role has `ec2:DescribeImages`, `ec2:CopyImage`, `ec2:CreateTags`, `ec2:RegisterImage`, and `ec2:DeregisterImage` permissions (check inline policy in `main.tf:171-220`)
 
 ### Red Hat API Integration Issues
 

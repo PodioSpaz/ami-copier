@@ -190,7 +190,9 @@ resource "aws_iam_role_policy" "lambda" {
           "ec2:DescribeImages",
           "ec2:CopyImage",
           "ec2:CreateTags",
-          "ec2:DescribeSnapshots"
+          "ec2:DescribeSnapshots",
+          "ec2:RegisterImage",
+          "ec2:DeregisterImage"
         ]
         Resource = "*"
       }
