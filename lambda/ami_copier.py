@@ -71,6 +71,10 @@ def build_block_device_mappings_for_registration(block_device_mappings: List[Dic
                 ebs['VolumeType'] = 'gp3'
                 logger.info(f"Converting volume type from gp2 to gp3 for device {mapping['DeviceName']}")
 
+            # Remove Encrypted flag - encryption is inherited from the snapshot
+            # Specifying Encrypted when using existing snapshot IDs causes an error
+            ebs.pop('Encrypted', None)
+
             modified_mappings.append({
                 'DeviceName': mapping['DeviceName'],
                 'Ebs': ebs
