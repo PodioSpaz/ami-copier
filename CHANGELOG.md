@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.2.1](https://github.com/PodioSpaz/ami-copier/compare/v0.2.0...v0.2.1) (2025-11-04)
+
+
+### Bug Fixes
+
+* implement two-step AMI copy process to support gp3 conversion ([8f6306f](https://github.com/PodioSpaz/ami-copier/commit/8f6306f428805fdb2709c226b8a5e1c2d7256ac5))
+* implement two-step AMI copy process to support gp3 conversion ([afeec48](https://github.com/PodioSpaz/ami-copier/commit/afeec48528b320d49738fafc48b37624eba9d284))
+
 ## [0.2.0](https://github.com/PodioSpaz/ami-copier/compare/v0.1.5...v0.2.0) (2025-11-03)
 
 
