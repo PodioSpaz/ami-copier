@@ -453,31 +453,40 @@ def discover_shared_amis() -> List[Dict[str, Any]]:
         raise
 
 
-def ami_already_copied(ami_name: str) -> bool:
+def ami_already_copied(source_ami_id: str, uuid: Optional[str] = None) -> bool:
     """
-    Check if an AMI with the given name already exists in this account.
+    Check if an AMI from the given source has already been copied.
+
+    Uses tags to identify duplicates: SourceAMI (always) and SourceAMIUUID (when available).
+    This approach is robust against timestamp variations in AMI names.
 
     Args:
-        ami_name: Name of the AMI to check
+        source_ami_id: Source AMI ID to check
+        uuid: Optional UUID extracted from source AMI name
 
     Returns:
-        True if AMI exists, False otherwise
+        True if AMI from this source already copied, False otherwise
     """
     try:
+        # Build filters - always check SourceAMI tag
+        filters = [
+            {'Name': 'tag:SourceAMI', 'Values': [source_ami_id]}
+        ]
+
+        # If UUID is available, add it for more precise matching
+        if uuid:
+            filters.append({'Name': 'tag:SourceAMIUUID', 'Values': [uuid]})
+
         response = ec2_client.describe_images(
             Owners=['self'],
-            Filters=[
-                {
-                    'Name': 'name',
-                    'Values': [ami_name]
-                }
-            ]
+            Filters=filters
         )
 
         exists = len(response.get('Images', [])) > 0
 
         if exists:
-            logger.info(f"AMI with name '{ami_name}' already exists, skipping copy")
+            uuid_info = f" (UUID: {uuid})" if uuid else ""
+            logger.info(f"AMI from source {source_ami_id}{uuid_info} already exists, skipping copy")
 
         return exists
 
@@ -662,11 +671,11 @@ def process_ami(source_ami_id: str, ami_name_template: str, base_tags: Dict[str,
         logger.info(f"Generated target AMI name: {ami_name}")
 
         # Check for duplicates
-        if ami_already_copied(ami_name):
+        if ami_already_copied(source_ami_id, uuid):
             return {
                 'source_ami_id': source_ami_id,
                 'status': 'skipped',
-                'message': f'AMI already copied with name: {ami_name}',
+                'message': f'AMI already copied from source: {source_ami_id}',
                 'ami_name': ami_name
             }
 
