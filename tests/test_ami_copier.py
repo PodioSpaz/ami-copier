@@ -651,26 +651,92 @@ class TestDiscoverSharedAmis:
 
 # Tests for ami_already_copied()
 class TestAmiAlreadyCopied:
-    """Tests for deduplication check."""
+    """Tests for deduplication check using tags."""
 
-    def test_ami_exists(self, mock_ec2_client):
-        """Test when AMI with same name already exists."""
-        # Create an AMI with a specific name
-        mock_ec2_client.register_image(
+    def test_ami_exists_by_source_ami_tag(self, mock_ec2_client):
+        """Test when AMI with same SourceAMI tag already exists."""
+        # Create an AMI with SourceAMI tag
+        ami_id = mock_ec2_client.register_image(
             Name='rhel-9-test-encrypted',
             Architecture='x86_64',
             RootDeviceName='/dev/sda1'
+        )['ImageId']
+
+        mock_ec2_client.create_tags(
+            Resources=[ami_id],
+            Tags=[
+                {'Key': 'SourceAMI', 'Value': 'ami-source123'},
+                {'Key': 'CopiedBy', 'Value': 'ami-copier-lambda'}
+            ]
         )
 
         with patch('ami_copier.ec2_client', mock_ec2_client):
-            exists = ami_copier.ami_already_copied('rhel-9-test-encrypted')
+            exists = ami_copier.ami_already_copied('ami-source123')
+
+        assert exists is True
+
+    def test_ami_exists_by_source_ami_and_uuid_tags(self, mock_ec2_client):
+        """Test when AMI with same SourceAMI and SourceAMIUUID tags already exists."""
+        # Create an AMI with both SourceAMI and SourceAMIUUID tags
+        ami_id = mock_ec2_client.register_image(
+            Name='rhel-9-test-encrypted',
+            Architecture='x86_64',
+            RootDeviceName='/dev/sda1'
+        )['ImageId']
+
+        test_uuid = 'a1b2c3d4-1234-5678-9abc-def012345678'
+        mock_ec2_client.create_tags(
+            Resources=[ami_id],
+            Tags=[
+                {'Key': 'SourceAMI', 'Value': 'ami-source123'},
+                {'Key': 'SourceAMIUUID', 'Value': test_uuid},
+                {'Key': 'CopiedBy', 'Value': 'ami-copier-lambda'}
+            ]
+        )
+
+        with patch('ami_copier.ec2_client', mock_ec2_client):
+            exists = ami_copier.ami_already_copied('ami-source123', test_uuid)
 
         assert exists is True
 
     def test_ami_does_not_exist(self, mock_ec2_client):
-        """Test when AMI with name does not exist."""
+        """Test when AMI with source AMI ID does not exist."""
         with patch('ami_copier.ec2_client', mock_ec2_client):
-            exists = ami_copier.ami_already_copied('nonexistent-ami')
+            exists = ami_copier.ami_already_copied('ami-nonexistent')
+
+        assert exists is False
+
+    def test_ami_does_not_exist_with_uuid(self, mock_ec2_client):
+        """Test when AMI with source AMI ID and UUID does not exist."""
+        with patch('ami_copier.ec2_client', mock_ec2_client):
+            exists = ami_copier.ami_already_copied(
+                'ami-nonexistent',
+                'a1b2c3d4-1234-5678-9abc-def012345678'
+            )
+
+        assert exists is False
+
+    def test_ami_exists_different_uuid(self, mock_ec2_client):
+        """Test that UUID mismatch returns False even if SourceAMI matches."""
+        # Create an AMI with SourceAMI and SourceAMIUUID tags
+        ami_id = mock_ec2_client.register_image(
+            Name='rhel-9-test-encrypted',
+            Architecture='x86_64',
+            RootDeviceName='/dev/sda1'
+        )['ImageId']
+
+        mock_ec2_client.create_tags(
+            Resources=[ami_id],
+            Tags=[
+                {'Key': 'SourceAMI', 'Value': 'ami-source123'},
+                {'Key': 'SourceAMIUUID', 'Value': 'uuid-original'},
+                {'Key': 'CopiedBy', 'Value': 'ami-copier-lambda'}
+            ]
+        )
+
+        with patch('ami_copier.ec2_client', mock_ec2_client):
+            # Check with different UUID - should not match because both filters must match
+            exists = ami_copier.ami_already_copied('ami-source123', 'uuid-different')
 
         assert exists is False
 
@@ -684,7 +750,7 @@ class TestAmiAlreadyCopied:
             )
 
             # Should return False on error (fail-safe)
-            exists = ami_copier.ami_already_copied('test-ami')
+            exists = ami_copier.ami_already_copied('ami-test123')
 
         assert exists is False
 
