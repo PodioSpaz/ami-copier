@@ -5,6 +5,19 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.0](https://github.com/PodioSpaz/ami-copier/compare/v0.2.2...v0.3.0) (2025-11-05)
+
+
+### Features
+
+* add ami_name_tag_template for customizable Name tags ([e097cf8](https://github.com/PodioSpaz/ami-copier/commit/e097cf864bfb9601b7b01399ec48a9e3417daf4e))
+* add ami_name_tag_template variable for customizable Name tags ([4cba5bf](https://github.com/PodioSpaz/ami-copier/commit/4cba5bf1381c69204ff8aea08e0765ca5e64b97b))
+
+
+### Documentation
+
+* document ami_name_tag_template variable ([100c48f](https://github.com/PodioSpaz/ami-copier/commit/100c48fc85cb20aa64dbb4d039a5a668fec8d561))
+
 ## [0.2.2](https://github.com/PodioSpaz/ami-copier/compare/v0.2.1...v0.2.2) (2025-11-04)
 
 
