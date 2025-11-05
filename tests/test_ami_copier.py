@@ -528,38 +528,28 @@ class TestEnrichTagsFromCompose:
         assert 'Distribution' not in enriched
 
 
-# Tests for get_block_device_mappings()
-class TestGetBlockDeviceMappings:
+# Tests for build_block_device_mappings_for_registration()
+class TestBuildBlockDeviceMappings:
     """Tests for block device mapping conversion."""
 
-    def test_convert_gp2_to_gp3(self, mock_ec2_client, sample_ami_data):
+    def test_convert_gp2_to_gp3(self, sample_ami_data):
         """Test conversion of gp2 volumes to gp3."""
-        # Create a test AMI
-        mock_ec2_client.register_image(
-            Name=sample_ami_data['Name'],
-            Description=sample_ami_data['Description'],
-            Architecture='x86_64',
-            RootDeviceName='/dev/sda1',
-            BlockDeviceMappings=sample_ami_data['BlockDeviceMappings']
-        )
+        # Test the build_block_device_mappings_for_registration function directly
+        original_mappings = sample_ami_data['BlockDeviceMappings']
 
-        # Get the AMI ID
-        images = mock_ec2_client.describe_images(Owners=['self'])
-        ami_id = images['Images'][0]['ImageId']
+        modified_mappings = ami_copier.build_block_device_mappings_for_registration(original_mappings)
 
-        with patch('ami_copier.ec2_client', mock_ec2_client):
-            mappings, source_image = ami_copier.get_block_device_mappings(ami_id)
+        # Verify we got mappings back
+        assert len(modified_mappings) == 2
 
-        # Verify we got mappings back (moto may not preserve all block devices)
-        assert len(mappings) >= 1
-
-        # Verify gp2 conversion logic - check that all gp2 volumes are converted
-        for mapping in mappings:
+        # Verify gp2 conversion logic - check that gp2 was converted to gp3
+        for i, mapping in enumerate(modified_mappings):
             if 'Ebs' in mapping:
-                # If original was gp2, it should now be gp3
-                # moto doesn't always preserve volume types, so check the structure
-                assert 'VolumeType' in mapping['Ebs']
-                assert 'SnapshotId' not in mapping['Ebs']
+                original_type = original_mappings[i]['Ebs'].get('VolumeType', 'gp2')
+                expected_type = 'gp3' if original_type == 'gp2' else original_type
+
+                assert mapping['Ebs']['VolumeType'] == expected_type
+                # Verify Encrypted flag was removed (inherited from snapshot)
                 assert 'Encrypted' not in mapping['Ebs']
 
     def test_ami_not_found(self, mock_ec2_client):
@@ -568,7 +558,7 @@ class TestGetBlockDeviceMappings:
             # moto raises ClientError instead of returning empty results
             # Both are acceptable behaviors
             try:
-                mappings, source_image = ami_copier.get_block_device_mappings('ami-nonexistent')
+                source_image = ami_copier.get_source_ami_details('ami-nonexistent')
                 # If no exception, result should be empty or raise ValueError
                 assert False, "Should have raised an exception"
             except (ValueError, Exception):
@@ -810,55 +800,82 @@ class TestGenerateNameTag:
 class TestCopyAmi:
     """Tests for AMI copy operation."""
 
-    def test_copy_ami_success(self, mock_ec2_client, sample_ami_data):
+    def test_copy_ami_success(self, aws_credentials, sample_ami_data):
         """Test successful AMI copy."""
-        # Create source AMI
-        mock_ec2_client.register_image(
-            Name=sample_ami_data['Name'],
-            Description=sample_ami_data['Description'],
-            Architecture='x86_64',
-            RootDeviceName='/dev/sda1',
-            BlockDeviceMappings=sample_ami_data['BlockDeviceMappings']
-        )
-
-        images = mock_ec2_client.describe_images(Owners=['self'])
-        source_ami_id = images['Images'][0]['ImageId']
-
+        source_ami_id = 'ami-12345678'
         tags = {'Environment': 'test', 'Team': 'infrastructure'}
 
-        # Mock the copy_image call since moto has limitations with BlockDeviceMappings parameter
+        # Create complete temp AMI data with all required fields
+        temp_ami_data = sample_ami_data.copy()
+        temp_ami_data['ImageId'] = 'ami-temp123'
+        temp_ami_data['Architecture'] = 'x86_64'
+        temp_ami_data['RootDeviceName'] = '/dev/sda1'
+        temp_ami_data['VirtualizationType'] = 'hvm'
+
+        # Mock the two-step copy process
         with patch('ami_copier.ec2_client') as mock_client:
-            mock_client.describe_images.return_value = {
-                'Images': [sample_ami_data]
-            }
+            # describe_images returns source AMI first, then temp AMI
+            mock_client.describe_images.side_effect = [
+                {'Images': [sample_ami_data]},  # Source AMI
+                {'Images': [temp_ami_data]}      # Temp AMI
+            ]
             mock_client.copy_image.return_value = {
-                'ImageId': 'ami-copied123'
+                'ImageId': 'ami-temp123'
             }
+            mock_client.register_image.return_value = {
+                'ImageId': 'ami-final123'
+            }
+
+            # Mock the waiter
+            mock_waiter = mock_client.get_waiter.return_value
+            mock_waiter.wait.return_value = None
 
             new_ami_id = ami_copier.copy_ami(source_ami_id, 'test-copy', tags)
 
-        # Verify new AMI was created
-        assert new_ami_id == 'ami-copied123'
+        # Verify new AMI was created (should be the final AMI ID)
+        assert new_ami_id == 'ami-final123'
 
         # Verify copy_image was called
         assert mock_client.copy_image.called
 
+        # Verify register_image was called (step 2 of the process)
+        assert mock_client.register_image.called
+
+        # Verify deregister_image was called (to remove temp AMI)
+        assert mock_client.deregister_image.called
+
         # Verify tags were applied
         assert mock_client.create_tags.called
 
-    def test_copy_ami_with_uuid(self, sample_ami_data):
+    def test_copy_ami_with_uuid(self, aws_credentials, sample_ami_data):
         """Test AMI copy with UUID tag."""
         source_ami_id = 'ami-12345678'
         tags = {'Environment': 'test'}
         uuid = 'a1b2c3d4-5678-90ab-cdef-1234567890ab'
 
+        # Create complete temp AMI data with all required fields
+        temp_ami_data = sample_ami_data.copy()
+        temp_ami_data['ImageId'] = 'ami-temp123'
+        temp_ami_data['Architecture'] = 'x86_64'
+        temp_ami_data['RootDeviceName'] = '/dev/sda1'
+        temp_ami_data['VirtualizationType'] = 'hvm'
+
         with patch('ami_copier.ec2_client') as mock_client:
-            mock_client.describe_images.return_value = {
-                'Images': [sample_ami_data]
-            }
+            # describe_images returns source AMI first, then temp AMI
+            mock_client.describe_images.side_effect = [
+                {'Images': [sample_ami_data]},  # Source AMI
+                {'Images': [temp_ami_data]}      # Temp AMI
+            ]
             mock_client.copy_image.return_value = {
-                'ImageId': 'ami-copied123'
+                'ImageId': 'ami-temp123'
             }
+            mock_client.register_image.return_value = {
+                'ImageId': 'ami-final123'
+            }
+
+            # Mock the waiter
+            mock_waiter = mock_client.get_waiter.return_value
+            mock_waiter.wait.return_value = None
 
             new_ami_id = ami_copier.copy_ami(source_ami_id, 'test-copy', tags, uuid)
 
@@ -1024,19 +1041,43 @@ class TestLambdaHandler:
         os.environ['TAGS'] = json.dumps({'Environment': 'production'})
         os.environ.pop('REDHAT_CREDENTIAL_STORE', None)
 
-        # Mock EC2 client calls - need to differentiate between source AMI lookup and dedup check
+        # Create complete temp AMI data with all required fields
+        temp_ami_data = sample_ami_data.copy()
+        temp_ami_data['ImageId'] = 'ami-temp123'
+        temp_ami_data['Architecture'] = 'x86_64'
+        temp_ami_data['RootDeviceName'] = '/dev/sda1'
+        temp_ami_data['VirtualizationType'] = 'hvm'
+
+        # Mock EC2 client calls - need to handle multiple describe_images calls
         with patch('ami_copier.ec2_client') as mock_client:
+            call_count = [0]
+
             def describe_images_side_effect(*args, **kwargs):
-                # Check if this is the deduplication check (Owners=['self'])
-                if kwargs.get('Owners') == ['self']:
+                call_count[0] += 1
+                # Check if this is the deduplication check (Owners=['self'] and Filters with name)
+                if kwargs.get('Owners') == ['self'] and kwargs.get('Filters'):
                     return {'Images': []}  # No existing copy
+                # Otherwise it's a source AMI or temp AMI lookup
                 else:
-                    return {'Images': [sample_ami_data]}  # Source AMI exists
+                    # First call: source AMI lookup in process_ami
+                    # Second call: source AMI lookup in copy_ami (get_source_ami_details)
+                    # Third call: temp AMI lookup in copy_ami
+                    if call_count[0] <= 2:
+                        return {'Images': [sample_ami_data]}  # Source AMI
+                    else:
+                        return {'Images': [temp_ami_data]}  # Temp AMI
 
             mock_client.describe_images.side_effect = describe_images_side_effect
             mock_client.copy_image.return_value = {
-                'ImageId': 'ami-copied123'
+                'ImageId': 'ami-temp123'
             }
+            mock_client.register_image.return_value = {
+                'ImageId': 'ami-final123'
+            }
+
+            # Mock the waiter
+            mock_waiter = mock_client.get_waiter.return_value
+            mock_waiter.wait.return_value = None
 
             response = ami_copier.lambda_handler(sample_manual_event, None)
 
@@ -1044,7 +1085,7 @@ class TestLambdaHandler:
         body = json.loads(response['body'])
         assert body['mode'] == 'manual'
         assert body['result']['source_ami_id'] == 'ami-12345678'
-        assert body['result']['new_ami_id'] == 'ami-copied123'
+        assert body['result']['new_ami_id'] == 'ami-final123'
         assert body['result']['status'] == 'copied'
 
     def test_lambda_handler_scheduled_mode_success(self, sample_redhat_ami_data, sample_scheduled_event):
@@ -1053,20 +1094,46 @@ class TestLambdaHandler:
         os.environ['AMI_NAME_TEMPLATE'] = 'rhel-{uuid}-encrypted'
         os.environ['TAGS'] = json.dumps({'Environment': 'production'})
 
+        # Add required fields to sample_redhat_ami_data
+        sample_redhat_ami_data['Architecture'] = 'x86_64'
+        sample_redhat_ami_data['RootDeviceName'] = '/dev/sda1'
+        sample_redhat_ami_data['VirtualizationType'] = 'hvm'
+
+        # Create temp AMI data
+        temp_ami_data = sample_redhat_ami_data.copy()
+        temp_ami_data['ImageId'] = 'ami-temp123'
+
         # Mock EC2 client calls
         with patch('ami_copier.ec2_client') as mock_client:
+            call_count = [0]
+
             def describe_images_side_effect(*args, **kwargs):
-                # Deduplication check
-                if kwargs.get('Owners') == ['self']:
+                call_count[0] += 1
+                # Deduplication check (Owners=['self'] and Filters with name)
+                if kwargs.get('Owners') == ['self'] and kwargs.get('Filters'):
                     return {'Images': []}  # No existing copy
-                # Discovery or source AMI lookup
-                else:
+                # Discovery (Owners=[REDHAT_ACCOUNT_ID])
+                elif kwargs.get('Owners') == ['463606842039']:
                     return {'Images': [sample_redhat_ami_data]}
+                # Source AMI or temp AMI lookup
+                else:
+                    # First few calls: source AMI lookup
+                    if call_count[0] <= 3:
+                        return {'Images': [sample_redhat_ami_data]}
+                    else:
+                        return {'Images': [temp_ami_data]}  # Temp AMI
 
             mock_client.describe_images.side_effect = describe_images_side_effect
             mock_client.copy_image.return_value = {
-                'ImageId': 'ami-newcopy123'
+                'ImageId': 'ami-temp123'
             }
+            mock_client.register_image.return_value = {
+                'ImageId': 'ami-final123'
+            }
+
+            # Mock the waiter
+            mock_waiter = mock_client.get_waiter.return_value
+            mock_waiter.wait.return_value = None
 
             response = ami_copier.lambda_handler(sample_scheduled_event, None)
 
@@ -1175,6 +1242,15 @@ class TestLambdaHandler:
         # Use Red Hat AMI in manual event
         sample_manual_event['source_ami_id'] = 'ami-redhat123'
 
+        # Add required fields to sample_redhat_ami_data
+        sample_redhat_ami_data['Architecture'] = 'x86_64'
+        sample_redhat_ami_data['RootDeviceName'] = '/dev/sda1'
+        sample_redhat_ami_data['VirtualizationType'] = 'hvm'
+
+        # Create temp AMI data
+        temp_ami_data = sample_redhat_ami_data.copy()
+        temp_ami_data['ImageId'] = 'ami-temp123'
+
         # Mock Red Hat API integration
         mock_get_creds.return_value = {
             'client_id': 'test-id',
@@ -1197,18 +1273,32 @@ class TestLambdaHandler:
 
         # Mock EC2 client
         with patch('ami_copier.ec2_client') as mock_client:
+            call_count = [0]
+
             def describe_images_side_effect(*args, **kwargs):
-                # Deduplication check
-                if kwargs.get('Owners') == ['self']:
+                call_count[0] += 1
+                # Deduplication check (Owners=['self'] and Filters with name)
+                if kwargs.get('Owners') == ['self'] and kwargs.get('Filters'):
                     return {'Images': []}  # No existing copy
-                # Source AMI lookup
+                # Source AMI or temp AMI lookup
                 else:
-                    return {'Images': [sample_redhat_ami_data]}
+                    # First few calls: source AMI lookup
+                    if call_count[0] <= 2:
+                        return {'Images': [sample_redhat_ami_data]}
+                    else:
+                        return {'Images': [temp_ami_data]}  # Temp AMI
 
             mock_client.describe_images.side_effect = describe_images_side_effect
             mock_client.copy_image.return_value = {
-                'ImageId': 'ami-copied123'
+                'ImageId': 'ami-temp123'
             }
+            mock_client.register_image.return_value = {
+                'ImageId': 'ami-final123'
+            }
+
+            # Mock the waiter
+            mock_waiter = mock_client.get_waiter.return_value
+            mock_waiter.wait.return_value = None
 
             response = ami_copier.lambda_handler(sample_manual_event, None)
 
