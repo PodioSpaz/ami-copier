@@ -139,6 +139,37 @@ module "ami_copier" {
 }
 ```
 
+### Custom Name Tag
+
+The `ami_name_tag_template` variable allows you to set a custom **Name tag** on copied AMIs, separate from the AMI's EC2 name. This is useful for creating simpler, more readable display names in the AWS Console.
+
+**Available placeholders:**
+- `{distribution}` - RHEL version from Red Hat API (e.g., "rhel-9") - **Requires API integration**
+- `{source_name}` - Original AMI name
+- `{uuid}` - UUID extracted from Red Hat AMI name
+- `{date}` - Current date/time (format: YYYYMMDD-HHMMSS)
+- `{timestamp}` - Unix timestamp
+
+**Important:** The Name tag is only applied when the `Distribution` tag is available, which requires Red Hat API integration (`enable_redhat_api = true`). If API integration is disabled or the Distribution tag is unavailable, no Name tag will be set.
+
+```hcl
+module "ami_copier" {
+  source = "./ami-copier"
+
+  ami_name_template     = "rhel-{uuid}-encrypted-gp3-{date}"  # AMI EC2 name
+  ami_name_tag_template = "prod-{distribution}"                # Name tag for display
+
+  # API integration required for Distribution tag
+  enable_redhat_api    = true
+  redhat_client_id     = var.redhat_client_id
+  redhat_client_secret = var.redhat_client_secret
+
+  # Result:
+  # - AMI EC2 name: rhel-5bc3b908-...-encrypted-gp3-20251105-142030
+  # - Name tag: prod-rhel-9
+}
+```
+
 ### Multiple RHEL Versions
 
 To differentiate between RHEL 9 and RHEL 10:
@@ -188,7 +219,7 @@ By default, Red Hat Image Builder AMIs have generic names like `composer-api-5bc
 **Benefits:**
 - **ComposeId** - Links AMI to specific Image Builder compose
 - **ImageBuilderName** - Custom name from compose request
-- **Distribution** - RHEL version (e.g., "rhel-9", "rhel-10")
+- **Distribution** - RHEL version (e.g., "rhel-9", "rhel-10") - Can be used in `ami_name_tag_template` for custom Name tags
 - **Architecture** - x86_64 or aarch64
 - **ComposeCreatedAt** - When the image was built
 - **BlueprintId/BlueprintVersion** - If built from a blueprint
@@ -496,6 +527,7 @@ Releases are fully automated:
 |------|-------------|------|---------|----------|
 | name_prefix | Prefix for naming resources | string | "rhel" | no |
 | ami_name_template | Template for AMI names (supports {source_name}, {uuid}, {date}, {timestamp}) | string | "rhel-{uuid}-encrypted-gp3-{date}" | no |
+| ami_name_tag_template | Template for Name tag on copied AMIs (supports {distribution}, {source_name}, {uuid}, {date}, {timestamp}). Only applied when Distribution tag is available from API integration. | string | "" | no |
 | tags | Tags to apply to copied AMIs and resources | map(string) | {} | no |
 | lambda_timeout | Lambda timeout in seconds (60-900) | number | 300 | no |
 | lambda_memory_size | Lambda memory in MB (128-10240) | number | 256 | no |

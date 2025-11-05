@@ -76,10 +76,13 @@ module "rhel10_copier" {
 #   ami_name_template = "rhel-9-{uuid}-encrypted"
 #
 #   # Enable Red Hat Image Builder API integration (using SSM Parameter Store)
-#   enable_redhat_api     = true
+#   enable_redhat_api       = true
 #   redhat_credential_store = "ssm"  # or "secretsmanager"
-#   redhat_client_id      = var.redhat_client_id      # Set in terraform.tfvars
-#   redhat_client_secret  = var.redhat_client_secret  # Set in terraform.tfvars
+#   redhat_client_id        = var.redhat_client_id      # Set in terraform.tfvars
+#   redhat_client_secret    = var.redhat_client_secret  # Set in terraform.tfvars
+#
+#   # Optional: Set a custom Name tag using Distribution from API
+#   ami_name_tag_template = "prod-{distribution}"  # Results in "prod-rhel-9"
 #
 #   lambda_timeout = 600  # Increased timeout for API calls
 #
