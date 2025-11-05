@@ -5,6 +5,14 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [0.3.1](https://github.com/PodioSpaz/ami-copier/compare/v0.3.0...v0.3.1) (2025-11-05)
+
+
+### Bug Fixes
+
+* use tag-based deduplication to prevent duplicate AMI copies ([6d5c665](https://github.com/PodioSpaz/ami-copier/commit/6d5c665a4f5f719cc076a8ea127d542848f42b8a))
+* use tag-based deduplication to prevent duplicate AMI copies ([fbf204e](https://github.com/PodioSpaz/ami-copier/commit/fbf204e14caf7884bcdd310539373b22e7fd1577))
+
 ## [0.3.0](https://github.com/PodioSpaz/ami-copier/compare/v0.2.2...v0.3.0) (2025-11-05)
 
 
