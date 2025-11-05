@@ -391,6 +391,38 @@ def generate_ami_name(template: str, source_image: Dict[str, Any], uuid: Optiona
     return name
 
 
+def generate_name_tag(template: str, source_image: Dict[str, Any], uuid: Optional[str], distribution: str) -> str:
+    """
+    Generate Name tag value from template.
+
+    Args:
+        template: Name tag template with placeholders
+        source_image: Source AMI metadata
+        uuid: Optional UUID extracted from source AMI name
+        distribution: Distribution value from Red Hat API (e.g., 'rhel-9')
+
+    Returns:
+        Generated Name tag value
+    """
+    source_name = source_image.get('Name', 'unknown')
+    creation_date = datetime.utcnow().strftime('%Y%m%d-%H%M%S')
+
+    # Replace placeholders
+    name = template.replace('{distribution}', distribution)
+    name = name.replace('{source_name}', source_name)
+    name = name.replace('{date}', creation_date)
+    name = name.replace('{timestamp}', str(int(datetime.utcnow().timestamp())))
+
+    # Add UUID placeholder support
+    if uuid:
+        name = name.replace('{uuid}', uuid)
+    else:
+        # Remove {uuid} placeholder if no UUID available
+        name = name.replace('{uuid}', 'no-uuid')
+
+    return name
+
+
 def discover_shared_amis() -> List[Dict[str, Any]]:
     """
     Discover AMIs shared by Red Hat Image Builder.
@@ -455,7 +487,7 @@ def ami_already_copied(ami_name: str) -> bool:
         return False
 
 
-def copy_ami(source_ami_id: str, ami_name: str, tags: Dict[str, str], uuid: Optional[str] = None) -> str:
+def copy_ami(source_ami_id: str, ami_name: str, tags: Dict[str, str], uuid: Optional[str] = None, name_tag_template: Optional[str] = None) -> str:
     """
     Copy AMI with encryption and gp3 volumes using a two-step process.
 
@@ -470,6 +502,7 @@ def copy_ami(source_ami_id: str, ami_name: str, tags: Dict[str, str], uuid: Opti
         ami_name: Name for the new AMI
         tags: Tags to apply to the AMI and snapshots
         uuid: Optional UUID extracted from source AMI name
+        name_tag_template: Optional template for generating Name tag (requires Distribution tag in tags)
 
     Returns:
         The final AMI ID with gp3 volumes
@@ -560,6 +593,12 @@ def copy_ami(source_ami_id: str, ami_name: str, tags: Dict[str, str], uuid: Opti
             if uuid:
                 all_tags['SourceAMIUUID'] = uuid
 
+            # Generate and add Name tag if template provided and Distribution available
+            if name_tag_template and 'Distribution' in all_tags:
+                name_tag_value = generate_name_tag(name_tag_template, source_image, uuid, all_tags.get('Distribution'))
+                all_tags['Name'] = name_tag_value
+                logger.info(f"Generated Name tag: {name_tag_value}")
+
             tag_list = [{'Key': k, 'Value': v} for k, v in all_tags.items()]
 
             ec2_client.create_tags(
@@ -584,7 +623,7 @@ def copy_ami(source_ami_id: str, ami_name: str, tags: Dict[str, str], uuid: Opti
         raise
 
 
-def process_ami(source_ami_id: str, ami_name_template: str, base_tags: Dict[str, str]) -> Dict[str, Any]:
+def process_ami(source_ami_id: str, ami_name_template: str, base_tags: Dict[str, str], name_tag_template: Optional[str] = None) -> Dict[str, Any]:
     """
     Process a single AMI: extract UUID, check for duplicates, enrich tags, and copy.
 
@@ -592,6 +631,7 @@ def process_ami(source_ami_id: str, ami_name_template: str, base_tags: Dict[str,
         source_ami_id: Source AMI ID to process
         ami_name_template: Template for generating AMI name
         base_tags: Base tags to apply
+        name_tag_template: Optional template for generating Name tag
 
     Returns:
         Dictionary with processing results
@@ -655,7 +695,7 @@ def process_ami(source_ami_id: str, ami_name_template: str, base_tags: Dict[str,
             logger.info("Red Hat API credentials not configured, using basic tags")
 
         # Copy the AMI
-        new_ami_id = copy_ami(source_ami_id, ami_name, tags, uuid)
+        new_ami_id = copy_ami(source_ami_id, ami_name, tags, uuid, name_tag_template)
 
         logger.info(f"Successfully initiated copy of {source_ami_id} to {new_ami_id}")
 
@@ -696,6 +736,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
     try:
         # Get configuration from environment variables
         ami_name_template = os.environ.get('AMI_NAME_TEMPLATE', '{source_name}-encrypted-gp3-{uuid}-{date}')
+        ami_name_tag_template = os.environ.get('AMI_NAME_TAG_TEMPLATE', '')
         tags_json = os.environ.get('TAGS', '{}')
         base_tags = json.loads(tags_json)
 
@@ -706,7 +747,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             # Manual mode: Process specific AMI
             logger.info(f"Manual invocation mode: Processing AMI {source_ami_id}")
 
-            result = process_ami(source_ami_id, ami_name_template, base_tags)
+            result = process_ami(source_ami_id, ami_name_template, base_tags, ami_name_tag_template)
 
             return {
                 'statusCode': 200 if result['status'] == 'copied' else 400,
@@ -738,7 +779,7 @@ def lambda_handler(event: Dict[str, Any], context: Any) -> Dict[str, Any]:
             results = []
             for ami in shared_amis:
                 ami_id = ami['ImageId']
-                result = process_ami(ami_id, ami_name_template, base_tags)
+                result = process_ami(ami_id, ami_name_template, base_tags, ami_name_tag_template)
                 results.append(result)
 
             # Summarize results

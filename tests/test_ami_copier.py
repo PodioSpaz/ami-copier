@@ -9,6 +9,8 @@ Tests cover:
 - AMI discovery from Red Hat account
 - Deduplication checks
 - AMI operations (block device mapping conversion, AMI copying)
+- Name tag generation with template placeholders
+- Name tag graceful degradation when Distribution tag is unavailable
 - Lambda handler event processing (scheduled and manual modes)
 """
 import json
@@ -757,6 +759,53 @@ class TestGenerateAmiName:
         assert name.startswith('rhel-9-test-uuid-1234-')
 
 
+# Tests for generate_name_tag()
+class TestGenerateNameTag:
+    """Tests for Name tag generation."""
+
+    def test_template_with_distribution(self):
+        """Test name tag generation with distribution placeholder."""
+        source_image = {'Name': 'rhel-9-base'}
+        template = 'prod-{distribution}'
+        distribution = 'rhel-9'
+
+        name = ami_copier.generate_name_tag(template, source_image, None, distribution)
+        assert name == 'prod-rhel-9'
+
+    def test_template_with_distribution_and_date(self):
+        """Test name tag generation with distribution and date placeholders."""
+        source_image = {'Name': 'test'}
+        template = '{distribution}-encrypted-{date}'
+        distribution = 'rhel-10'
+
+        name = ami_copier.generate_name_tag(template, source_image, None, distribution)
+        # Should contain distribution and date
+        assert name.startswith('rhel-10-encrypted-')
+        assert len(name) > 20  # Has date appended
+
+    def test_template_with_distribution_and_uuid(self):
+        """Test name tag generation with distribution and UUID placeholders."""
+        source_image = {'Name': 'test'}
+        template = '{distribution}-{uuid}'
+        distribution = 'rhel-9'
+        uuid = 'a1b2c3d4-5678-90ab-cdef-1234567890ab'
+
+        name = ami_copier.generate_name_tag(template, source_image, uuid, distribution)
+        assert name == 'rhel-9-a1b2c3d4-5678-90ab-cdef-1234567890ab'
+
+    def test_template_with_all_placeholders(self):
+        """Test name tag generation with all placeholders."""
+        source_image = {'Name': 'composer-api-test'}
+        template = '{distribution}-{source_name}-{uuid}-{timestamp}'
+        distribution = 'rhel-9'
+        uuid = 'test-uuid'
+
+        name = ami_copier.generate_name_tag(template, source_image, uuid, distribution)
+        assert name.startswith('rhel-9-composer-api-test-test-uuid-')
+        # Should have timestamp at end
+        assert name.split('-')[-1].isdigit()
+
+
 # Tests for copy_ami()
 class TestCopyAmi:
     """Tests for AMI copy operation."""
@@ -820,6 +869,148 @@ class TestCopyAmi:
         uuid_tags = [t for t in tags_list if t['Key'] == 'SourceAMIUUID']
         assert len(uuid_tags) == 1
         assert uuid_tags[0]['Value'] == uuid
+
+    def test_copy_ami_with_name_tag_and_distribution(self, aws_credentials, sample_ami_data):
+        """Test AMI copy with Name tag when Distribution tag is present."""
+        source_ami_id = 'ami-12345678'
+        tags = {'Environment': 'test', 'Distribution': 'rhel-9'}
+        uuid = 'a1b2c3d4-5678-90ab-cdef-1234567890ab'
+        name_tag_template = 'prod-{distribution}'
+
+        # Create complete temp AMI data
+        temp_ami_data = sample_ami_data.copy()
+        temp_ami_data['ImageId'] = 'ami-copied123'
+        temp_ami_data['Architecture'] = 'x86_64'
+        temp_ami_data['RootDeviceName'] = '/dev/sda1'
+        temp_ami_data['VirtualizationType'] = 'hvm'
+
+        with patch('ami_copier.ec2_client') as mock_client:
+            # describe_images returns source AMI first, then temp AMI
+            mock_client.describe_images.side_effect = [
+                {'Images': [sample_ami_data]},  # Source AMI
+                {'Images': [temp_ami_data]}      # Temp AMI
+            ]
+            mock_client.copy_image.return_value = {
+                'ImageId': 'ami-copied123'
+            }
+            mock_client.register_image.return_value = {
+                'ImageId': 'ami-final123'
+            }
+
+            new_ami_id = ami_copier.copy_ami(source_ami_id, 'test-copy', tags, uuid, name_tag_template)
+
+        # Verify Name tag was added
+        assert mock_client.create_tags.called
+        tag_call = mock_client.create_tags.call_args
+        tags_list = tag_call[1]['Tags']
+        name_tags = [t for t in tags_list if t['Key'] == 'Name']
+        assert len(name_tags) == 1
+        assert name_tags[0]['Value'] == 'prod-rhel-9'
+
+    def test_copy_ami_without_distribution_graceful_degradation(self, aws_credentials, sample_ami_data):
+        """Test AMI copy handles missing Distribution tag gracefully (no Name tag set)."""
+        source_ami_id = 'ami-12345678'
+        tags = {'Environment': 'test'}  # No Distribution tag
+        uuid = 'a1b2c3d4-5678-90ab-cdef-1234567890ab'
+        name_tag_template = 'prod-{distribution}'
+
+        # Create complete temp AMI data
+        temp_ami_data = sample_ami_data.copy()
+        temp_ami_data['ImageId'] = 'ami-copied123'
+        temp_ami_data['Architecture'] = 'x86_64'
+        temp_ami_data['RootDeviceName'] = '/dev/sda1'
+        temp_ami_data['VirtualizationType'] = 'hvm'
+
+        with patch('ami_copier.ec2_client') as mock_client:
+            mock_client.describe_images.side_effect = [
+                {'Images': [sample_ami_data]},  # Source AMI
+                {'Images': [temp_ami_data]}      # Temp AMI
+            ]
+            mock_client.copy_image.return_value = {
+                'ImageId': 'ami-copied123'
+            }
+            mock_client.register_image.return_value = {
+                'ImageId': 'ami-final123'
+            }
+
+            new_ami_id = ami_copier.copy_ami(source_ami_id, 'test-copy', tags, uuid, name_tag_template)
+
+        # Verify Name tag was NOT added (graceful degradation)
+        assert mock_client.create_tags.called
+        tag_call = mock_client.create_tags.call_args
+        tags_list = tag_call[1]['Tags']
+        name_tags = [t for t in tags_list if t['Key'] == 'Name']
+        assert len(name_tags) == 0  # No Name tag should be present
+
+    def test_copy_ami_with_empty_name_tag_template(self, aws_credentials, sample_ami_data):
+        """Test AMI copy with empty name_tag_template (no Name tag set)."""
+        source_ami_id = 'ami-12345678'
+        tags = {'Environment': 'test', 'Distribution': 'rhel-9'}
+        uuid = 'a1b2c3d4-5678-90ab-cdef-1234567890ab'
+        name_tag_template = ''  # Empty template
+
+        # Create complete temp AMI data
+        temp_ami_data = sample_ami_data.copy()
+        temp_ami_data['ImageId'] = 'ami-copied123'
+        temp_ami_data['Architecture'] = 'x86_64'
+        temp_ami_data['RootDeviceName'] = '/dev/sda1'
+        temp_ami_data['VirtualizationType'] = 'hvm'
+
+        with patch('ami_copier.ec2_client') as mock_client:
+            mock_client.describe_images.side_effect = [
+                {'Images': [sample_ami_data]},  # Source AMI
+                {'Images': [temp_ami_data]}      # Temp AMI
+            ]
+            mock_client.copy_image.return_value = {
+                'ImageId': 'ami-copied123'
+            }
+            mock_client.register_image.return_value = {
+                'ImageId': 'ami-final123'
+            }
+
+            new_ami_id = ami_copier.copy_ami(source_ami_id, 'test-copy', tags, uuid, name_tag_template)
+
+        # Verify Name tag was NOT added (empty template)
+        assert mock_client.create_tags.called
+        tag_call = mock_client.create_tags.call_args
+        tags_list = tag_call[1]['Tags']
+        name_tags = [t for t in tags_list if t['Key'] == 'Name']
+        assert len(name_tags) == 0
+
+    def test_copy_ami_with_none_name_tag_template(self, aws_credentials, sample_ami_data):
+        """Test AMI copy with None name_tag_template (backward compatibility)."""
+        source_ami_id = 'ami-12345678'
+        tags = {'Environment': 'test', 'Distribution': 'rhel-9'}
+        uuid = 'a1b2c3d4-5678-90ab-cdef-1234567890ab'
+        name_tag_template = None  # None (default)
+
+        # Create complete temp AMI data
+        temp_ami_data = sample_ami_data.copy()
+        temp_ami_data['ImageId'] = 'ami-copied123'
+        temp_ami_data['Architecture'] = 'x86_64'
+        temp_ami_data['RootDeviceName'] = '/dev/sda1'
+        temp_ami_data['VirtualizationType'] = 'hvm'
+
+        with patch('ami_copier.ec2_client') as mock_client:
+            mock_client.describe_images.side_effect = [
+                {'Images': [sample_ami_data]},  # Source AMI
+                {'Images': [temp_ami_data]}      # Temp AMI
+            ]
+            mock_client.copy_image.return_value = {
+                'ImageId': 'ami-copied123'
+            }
+            mock_client.register_image.return_value = {
+                'ImageId': 'ami-final123'
+            }
+
+            new_ami_id = ami_copier.copy_ami(source_ami_id, 'test-copy', tags, uuid, name_tag_template)
+
+        # Verify Name tag was NOT added (None template)
+        assert mock_client.create_tags.called
+        tag_call = mock_client.create_tags.call_args
+        tags_list = tag_call[1]['Tags']
+        name_tags = [t for t in tags_list if t['Key'] == 'Name']
+        assert len(name_tags) == 0
 
 
 # Tests for lambda_handler()
