@@ -235,8 +235,9 @@ resource "aws_lambda_function" "ami_copier" {
   environment {
     variables = merge(
       {
-        AMI_NAME_TEMPLATE = var.ami_name_template
-        TAGS              = local.tags_json
+        AMI_NAME_TEMPLATE     = var.ami_name_template
+        AMI_NAME_TAG_TEMPLATE = var.ami_name_tag_template
+        TAGS                  = local.tags_json
       },
       var.enable_redhat_api ? {
         REDHAT_CREDENTIAL_STORE = var.redhat_credential_store

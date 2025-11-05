@@ -20,6 +20,25 @@ variable "ami_name_template" {
   default     = "rhel-{uuid}-encrypted-gp3-{date}"
 }
 
+variable "ami_name_tag_template" {
+  description = <<-EOT
+    Template for the Name tag applied to copied AMIs. Available placeholders:
+    - {distribution}: RHEL version from Red Hat API (e.g., 'rhel-9')
+    - {source_name}: Name of the source AMI
+    - {uuid}: UUID extracted from Red Hat AMI name (composer-api-{uuid})
+    - {date}: Current date/time in format YYYYMMDD-HHMMSS
+    - {timestamp}: Unix timestamp
+
+    Example: 'prod-{distribution}' produces 'prod-rhel-9'
+             'myprefix-{distribution}-{date}' produces 'myprefix-rhel-9-20251105-143022'
+
+    Note: Name tag is only applied when Distribution tag is available (requires Red Hat API integration
+    with enable_redhat_api = true). If left empty (default), no Name tag will be applied.
+  EOT
+  type        = string
+  default     = ""
+}
+
 variable "tags" {
   description = "Tags to apply to copied AMIs and module resources. Tags will also include SourceAMI, CopiedBy, and CopyDate automatically."
   type        = map(string)
