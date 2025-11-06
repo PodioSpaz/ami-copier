@@ -45,14 +45,14 @@ variable "tags" {
   default     = {}
 }
 
-variable "lambda_timeout" {
-  description = "Lambda function timeout in seconds. AMI copy operations may take several minutes."
+variable "status_check_wait_time" {
+  description = "Time in seconds to wait between AMI copy status checks in Step Functions. Default is 300 seconds (5 minutes)."
   type        = number
   default     = 300
 
   validation {
-    condition     = var.lambda_timeout >= 60 && var.lambda_timeout <= 900
-    error_message = "Lambda timeout must be between 60 and 900 seconds (15 minutes)."
+    condition     = var.status_check_wait_time >= 60 && var.status_check_wait_time <= 3600
+    error_message = "Status check wait time must be between 60 and 3600 seconds (1 minute to 1 hour)."
   }
 }
 

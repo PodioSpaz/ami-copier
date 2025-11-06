@@ -1,16 +1,51 @@
-output "lambda_function_arn" {
-  description = "ARN of the Lambda function that copies AMIs"
-  value       = aws_lambda_function.ami_copier.arn
+output "state_machine_arn" {
+  description = "ARN of the Step Functions state machine that orchestrates AMI copy workflow"
+  value       = aws_sfn_state_machine.ami_copier.arn
 }
 
-output "lambda_function_name" {
-  description = "Name of the Lambda function"
-  value       = aws_lambda_function.ami_copier.function_name
+output "state_machine_name" {
+  description = "Name of the Step Functions state machine"
+  value       = aws_sfn_state_machine.ami_copier.name
+}
+
+output "initiator_lambda_arn" {
+  description = "ARN of the initiator Lambda function (discovers AMIs and starts copy)"
+  value       = aws_lambda_function.initiator.arn
+}
+
+output "initiator_lambda_name" {
+  description = "Name of the initiator Lambda function"
+  value       = aws_lambda_function.initiator.function_name
+}
+
+output "status_checker_lambda_arn" {
+  description = "ARN of the status checker Lambda function (checks AMI copy status)"
+  value       = aws_lambda_function.status_checker.arn
+}
+
+output "status_checker_lambda_name" {
+  description = "Name of the status checker Lambda function"
+  value       = aws_lambda_function.status_checker.function_name
+}
+
+output "finalizer_lambda_arn" {
+  description = "ARN of the finalizer Lambda function (re-registers with gp3 and applies tags)"
+  value       = aws_lambda_function.finalizer.arn
+}
+
+output "finalizer_lambda_name" {
+  description = "Name of the finalizer Lambda function"
+  value       = aws_lambda_function.finalizer.function_name
 }
 
 output "lambda_role_arn" {
-  description = "ARN of the IAM role used by the Lambda function"
+  description = "ARN of the IAM role used by the Lambda functions"
   value       = aws_iam_role.lambda.arn
+}
+
+output "step_functions_role_arn" {
+  description = "ARN of the IAM role used by Step Functions"
+  value       = aws_iam_role.step_functions.arn
 }
 
 output "eventbridge_rule_arn" {
@@ -28,9 +63,14 @@ output "schedule_expression" {
   value       = var.schedule_expression
 }
 
-output "cloudwatch_log_group_name" {
-  description = "Name of the CloudWatch Log Group for Lambda logs"
-  value       = aws_cloudwatch_log_group.lambda.name
+output "cloudwatch_log_group_names" {
+  description = "Names of the CloudWatch Log Groups for Lambda and Step Functions logs"
+  value = {
+    initiator      = aws_cloudwatch_log_group.initiator.name
+    status_checker = aws_cloudwatch_log_group.status_checker.name
+    finalizer      = aws_cloudwatch_log_group.finalizer.name
+    step_functions = aws_cloudwatch_log_group.step_functions.name
+  }
 }
 
 output "redhat_api_secret_arn" {
