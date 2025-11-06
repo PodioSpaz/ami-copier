@@ -5,6 +5,17 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.0](https://github.com/PodioSpaz/ami-copier/compare/v0.3.2...v1.0.0) (2025-11-06)
+
+
+### ⚠ BREAKING CHANGES
+
+* replace synchronous Lambda with Step Functions for async AMI copy ([#29](https://github.com/PodioSpaz/ami-copier/issues/29))
+
+### Features
+
+* replace synchronous Lambda with Step Functions for async AMI copy ([#29](https://github.com/PodioSpaz/ami-copier/issues/29)) ([080b39e](https://github.com/PodioSpaz/ami-copier/commit/080b39e447603563f7f8d01081954c5824bed9ea))
+
 ## [0.3.2](https://github.com/PodioSpaz/ami-copier/compare/v0.3.1...v0.3.2) (2025-11-06)
 
 
