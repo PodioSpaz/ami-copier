@@ -299,6 +299,62 @@ Each instance creates its own Lambda function and EventBridge rule. The `name_pr
   - Lambda timeout - The two-step copy process waits up to 30 minutes for AMI copy to complete. Increase `lambda_timeout` variable if needed (default: 900 seconds, recommended minimum for large AMIs or API integration: 600-900 seconds)
   - IAM permission errors - Verify Lambda role has `ec2:DescribeImages`, `ec2:CopyImage`, `ec2:CreateTags`, `ec2:RegisterImage`, and `ec2:DeregisterImage` permissions (check inline policy in `main.tf:171-220`)
 
+### Cleaning Up Orphaned Temporary AMIs
+
+The two-step AMI copy process creates temporary AMIs that are normally cleaned up automatically. However, if the Lambda function times out or crashes before cleanup completes, temporary AMIs may be orphaned.
+
+**Note:** The waiter can wait up to 30 minutes for AMI copy completion, but the default Lambda timeout is 15 minutes (900 seconds). This mismatch can cause timeouts for large AMIs.
+
+**Identifying orphaned temporary AMIs:**
+
+```bash
+# List temporary AMIs created by ami-copier that should have been cleaned up
+aws ec2 describe-images \
+  --owners self \
+  --filters "Name=name,Values=*-temp-*" \
+  --query 'Images[*].[ImageId,Name,CreationDate]' \
+  --output table
+```
+
+**Manual cleanup process:**
+
+```bash
+# 1. Find orphaned temporary AMIs (older than 1 hour)
+# macOS (BSD date):
+aws ec2 describe-images \
+  --owners self \
+  --filters "Name=name,Values=*-temp-*" \
+  --query "Images[?CreationDate<='$(date -u -v-1H +%Y-%m-%dT%H:%M:%S.000Z)'].[ImageId,Name,CreationDate]" \
+  --output table
+
+# Linux (GNU date):
+aws ec2 describe-images \
+  --owners self \
+  --filters "Name=name,Values=*-temp-*" \
+  --query "Images[?CreationDate<='$(date -u -d '1 hour ago' +%Y-%m-%dT%H:%M:%S.000Z)'].[ImageId,Name,CreationDate]" \
+  --output table
+
+# 2. Deregister a specific temporary AMI
+aws ec2 deregister-image --image-id ami-xxxxx
+
+# 3. Optionally delete the associated snapshots (if no longer needed)
+# CAUTION: Only delete snapshots if you're sure they're not used by other AMIs
+aws ec2 describe-snapshots \
+  --owner-ids self \
+  --filters "Name=description,Values=*temp-*" \
+  --query 'Snapshots[*].[SnapshotId,Description,StartTime]' \
+  --output table
+
+# Delete snapshot
+aws ec2 delete-snapshot --snapshot-id snap-xxxxx
+```
+
+**Preventive measures:**
+
+- Increase `lambda_timeout` to 1800 seconds (30 minutes) if processing large AMIs
+- Monitor CloudWatch Logs for timeout errors: `aws logs tail /aws/lambda/${name_prefix}-ami-copier --follow --filter-pattern "Task timed out"`
+- Consider implementing a periodic cleanup Lambda function to deregister temp AMIs older than 2 hours
+
 ### Red Hat API Integration Issues
 
 - **Service account authentication fails**:
