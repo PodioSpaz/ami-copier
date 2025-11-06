@@ -8,22 +8,51 @@ This is a Terraform module that automatically copies AMIs shared by Red Hat Imag
 
 ## Architecture
 
-The module uses a **scheduled polling architecture**:
+The module uses a **Step Functions-based asynchronous architecture**:
 
-1. **EventBridge Scheduled Rule** (`main.tf:177-184`) - Triggers Lambda every 12 hours (configurable) to discover shared AMIs
-2. **Lambda Function** (`lambda/ami_copier.py`) - Polls for shared Red Hat AMIs and copies them with modified settings
-3. **IAM Role & Policies** (`main.tf:67-137`) - Grants Lambda permissions for EC2 operations and CloudWatch logging
+1. **EventBridge Scheduled Rule** - Triggers Step Functions state machine every 12 hours (configurable) to discover shared AMIs
+2. **Step Functions State Machine** (`step_functions.tf`) - Orchestrates the asynchronous AMI copy workflow
+3. **Lambda Functions** (`lambda/`)
+   - **Initiator** (`initiator.py`) - Discovers Red Hat AMIs, enriches with Red Hat API metadata, initiates encrypted copy
+   - **Status Checker** (`status_checker.py`) - Checks AMI copy status
+   - **Finalizer** (`finalizer.py`) - Re-registers AMI with gp3 volumes, applies tags, cleans up temp AMI
+4. **Lambda Layer** (`shared_utils.py`) - Common utilities shared across Lambda functions
+5. **IAM Roles & Policies** - Permissions for Lambda, Step Functions, and EventBridge
 
 **Why polling instead of event-driven?**
 
 The initial design used EventBridge to monitor `ModifyImageAttribute` API calls via CloudTrail. However, these events are generated in the **creator account** (Red Hat's AWS account), not the consumer account where this module is deployed. See [AWS documentation](https://docs.aws.amazon.com/prescriptive-guidance/latest/patterns/monitor-use-of-a-shared-amazon-machine-image-across-multiple-aws-accounts.html) for details.
 
-The Lambda function:
-- Queries `DescribeImages` with owner filter `463606842039` (Red Hat's AWS account ID)
-- Extracts UUID from AMI name pattern: `composer-api-{uuid}`
-- Checks if AMI already copied (deduplication by name)
-- Copies AMI with encryption using `ec2:CopyImage`
-- Re-registers AMI with modified block device mappings (gp2→gp3) using `ec2:RegisterImage` and `ec2:DeregisterImage`
+**Why Step Functions instead of synchronous Lambda?**
+
+Lambda functions have a maximum timeout of 15 minutes, but large AMI copies can take 30+ minutes. Step Functions decouples the copy initiation from completion polling, eliminating timeout issues and providing better observability through visual workflow execution history.
+
+**Workflow:**
+
+```
+EventBridge Scheduled Rule
+  ↓
+Step Functions State Machine:
+  1. Initiator Lambda
+     - Discovers shared Red Hat AMIs (DescribeImages with owner 463606842039)
+     - Extracts UUID from AMI name pattern: composer-api-{uuid}
+     - Checks for duplicates (tag-based deduplication)
+     - Enriches tags with Red Hat Image Builder API metadata (optional)
+     - Initiates encrypted copy (ec2:CopyImage)
+     → Returns array of AMIs to process
+
+  2. For each AMI (sequential processing):
+     a. Wait 5 minutes (configurable: status_check_wait_time)
+     b. Status Checker Lambda - Check if copy is complete
+     c. If still pending → Loop back to wait
+     d. If available → Finalizer Lambda
+        - Retrieve temp AMI block device mappings
+        - Deregister temp AMI (snapshots retained)
+        - Re-register with gp3 volumes (ec2:RegisterImage)
+        - Apply tags (SourceAMI, UUID, Red Hat metadata, user tags)
+        - Clean up temp AMI
+     e. If failed → Error handling
+```
 
 ## Development Commands
 
@@ -43,45 +72,76 @@ terraform plan
 terraform apply
 ```
 
-### Testing the Lambda Function
+### Testing the Step Functions Workflow
 
-The Lambda function supports two invocation modes:
+The Step Functions state machine supports two invocation modes:
 
 **Scheduled Mode** (automatic discovery):
 ```bash
-# Manually trigger the scheduled discovery (scans all Red Hat AMIs)
-aws lambda invoke \
-  --function-name <function-name> \
-  --payload '{}' \
-  response.json
+# Manually trigger the state machine for discovery (scans all Red Hat AMIs)
+aws stepfunctions start-execution \
+  --state-machine-arn <state-machine-arn> \
+  --input '{}' \
+  --name "manual-discovery-$(date +%s)"
 
-# View the response
-cat response.json | jq
+# Get execution ARN from output, then check status
+aws stepfunctions describe-execution \
+  --execution-arn <execution-arn>
 
-# Expected response includes summary and results for each AMI found
+# View execution history with event details
+aws stepfunctions get-execution-history \
+  --execution-arn <execution-arn> \
+  --max-results 100
 ```
 
 **Manual Mode** (specific AMI):
 ```bash
 # Process a specific AMI on-demand
+aws stepfunctions start-execution \
+  --state-machine-arn <state-machine-arn> \
+  --input '{"source_ami_id":"ami-xxxxx"}' \
+  --name "manual-ami-$(date +%s)"
+
+# Check execution status
+aws stepfunctions describe-execution \
+  --execution-arn <execution-arn>
+```
+
+**View Logs**:
+```bash
+# Follow Step Functions logs
+aws logs tail /aws/vendedlogs/states/<name-prefix>-ami-copier --follow
+
+# Follow individual Lambda function logs
+aws logs tail /aws/lambda/<name-prefix>-ami-copier-initiator --follow
+aws logs tail /aws/lambda/<name-prefix>-ami-copier-status-checker --follow
+aws logs tail /aws/lambda/<name-prefix>-ami-copier-finalizer --follow
+
+# Check recent executions
+aws stepfunctions list-executions \
+  --state-machine-arn <state-machine-arn> \
+  --max-results 10
+```
+
+**Testing Individual Lambda Functions** (for development):
+```bash
+# Test initiator (discovery mode)
 aws lambda invoke \
-  --function-name <function-name> \
+  --function-name <name-prefix>-ami-copier-initiator \
+  --payload '{}' \
+  response.json
+
+# Test initiator (single AMI mode)
+aws lambda invoke \
+  --function-name <name-prefix>-ami-copier-initiator \
   --payload '{"source_ami_id":"ami-xxxxx"}' \
   response.json
 
-# View the response
-cat response.json | jq
-```
-
-**View Lambda Logs**:
-```bash
-# Follow logs in real-time
-aws logs tail /aws/lambda/<function-name> --follow
-
-# Check scheduled runs
-aws logs tail /aws/lambda/<function-name> \
-  --since 1h \
-  --filter-pattern "Scheduled polling mode"
+# Test status checker (requires temp_ami_id from initiator output)
+aws lambda invoke \
+  --function-name <name-prefix>-ami-copier-status-checker \
+  --payload '{"temp_ami_id":"ami-temp-xxxxx"}' \
+  response.json
 ```
 
 ### Finding Copied AMIs
@@ -97,44 +157,63 @@ aws ec2 describe-images \
 
 ### Scheduled AMI Discovery
 
-The EventBridge scheduled rule (`main.tf:177-184`) triggers the Lambda function on a configurable schedule (default: every 12 hours). The Lambda queries `DescribeImages` filtering by Red Hat's AWS account ID (`463606842039`) to discover shared AMIs.
+The EventBridge scheduled rule triggers the Step Functions state machine on a configurable schedule (default: every 12 hours). The Initiator Lambda function queries `DescribeImages` filtering by Red Hat's AWS account ID (`463606842039`) to discover shared AMIs.
 
 ### Deduplication Strategy
 
-To prevent copying the same AMI multiple times:
+To prevent copying the same AMI multiple times (performed in Initiator Lambda):
 
-1. **UUID Extraction** - Parses Red Hat AMI name pattern: `composer-api-{uuid}`
-2. **Name-based Check** - Generates target AMI name using template (includes UUID)
-3. **Existence Check** - Queries `DescribeImages` (owner: self) for AMIs with that name
-4. **Skip if Found** - Logs skip message and moves to next AMI
+1. **UUID Extraction** - Parses Red Hat AMI name pattern: `composer-api-{uuid}` (`shared_utils.py:extract_uuid_from_ami_name()`)
+2. **Tag-based Check** - Queries `DescribeImages` (owner: self) for AMIs with matching `SourceAMI` and `SourceAMIUUID` tags
+3. **Skip if Found** - Returns status="skipped" in workflow state, AMI not processed further
 
-The `{uuid}` placeholder in `ami_name_template` ensures uniqueness across copies.
+Using tag-based deduplication (instead of name matching) is robust against timestamp variations in AMI names.
 
 ### Lambda Environment Variables
 
-Configuration is passed to the Lambda function via environment variables:
+Configuration is passed to Lambda functions via environment variables:
+
+**Initiator Lambda:**
 - `AMI_NAME_TEMPLATE` - Template string with placeholders: `{source_name}`, `{uuid}`, `{date}`, `{timestamp}`
+- `AMI_NAME_TAG_TEMPLATE` - Optional template for Name tag: `{distribution}`, `{source_name}`, `{uuid}`, `{date}`, `{timestamp}`
 - `TAGS` - JSON-encoded map of tags to apply to copied AMIs
+- `REDHAT_CREDENTIAL_STORE` - Storage type for Red Hat API credentials ("ssm" or "secretsmanager")
+- `CLIENT_ID_PARAM` / `CLIENT_SECRET_PARAM` - SSM parameter names (if using SSM)
+- `REDHAT_SECRET_NAME` - Secrets Manager secret name (if using Secrets Manager)
+
+**Status Checker Lambda:**
+- No configuration needed - receives all state from Step Functions
+
+**Finalizer Lambda:**
+- No configuration needed - receives all state from Step Functions (including tags and name template from Initiator)
 
 ### Block Device Mapping Transformation (Two-Step Process)
 
-The Lambda function uses a **two-step process** to copy AMIs with gp2→gp3 conversion:
+The workflow uses a **two-step process** to copy AMIs with gp2→gp3 conversion:
 
 **Why two steps?**
 The AWS `copy_image()` API does not accept the `BlockDeviceMappings` parameter. Volume type changes must be applied during AMI registration, not during copy.
 
-**Step 1: Encrypted Copy** (`ami_copier.py:481-492`)
+**Step 1: Encrypted Copy** (Initiator Lambda - `initiator.py:initiate_ami_copy()`)
 - Calls `copy_image()` with `Encrypted=True` (no BlockDeviceMappings)
 - Creates encrypted snapshots with AWS-managed encryption (`aws/ebs` key)
 - Generates temporary AMI name with timestamp suffix
+- Returns temp_ami_id to Step Functions state
 
-**Step 2: Re-register with gp3** (`ami_copier.py:494-545`)
-- Waits for temporary AMI to become available (up to 30 minutes)
+**Step 2: Status Polling** (Status Checker Lambda - `status_checker.py`)
+- Repeatedly called by Step Functions (every 5 minutes by default)
+- Checks AMI state via `describe_images()`
+- Returns `continue_waiting=true` if still pending
+- Returns `ami_available=true` when ready
+- Step Functions loops until available or failed
+
+**Step 3: Re-register with gp3** (Finalizer Lambda - `finalizer.py:finalize_ami_copy()`)
 - Retrieves temporary AMI's block device mappings and snapshots
-- Modifies mappings to convert gp2→gp3 (`build_block_device_mappings_for_registration()`)
+- Modifies mappings to convert gp2→gp3 (`shared_utils.py:build_block_device_mappings_for_registration()`)
 - Deregisters temporary AMI (snapshots are retained)
 - Re-registers AMI using `register_image()` with modified mappings
 - Preserves all AMI attributes: Architecture, RootDeviceName, VirtualizationType, EnaSupport, SriovNetSupport, BootMode, TpmSupport, UefiData, ImdsSupport
+- Applies tags (including SourceAMI, SourceAMIUUID, CopiedBy, CopyDate, plus Red Hat API metadata)
 
 The final AMI references the encrypted snapshots from Step 1 with gp3 volume types applied in the block device mappings.
 

@@ -52,11 +52,48 @@ locals {
   )
 }
 
-# Archive the Lambda function code
-data "archive_file" "lambda" {
+# Archive the Lambda Layer code (shared_utils.py)
+data "archive_file" "lambda_layer" {
   type        = "zip"
-  source_dir  = "${path.module}/lambda"
-  output_path = "${path.module}/.terraform/lambda.zip"
+  source_dir  = "${path.module}/lambda_layer"
+  output_path = "${path.module}/.terraform/lambda_layer.zip"
+
+  depends_on = [
+    null_resource.prepare_lambda_layer
+  ]
+}
+
+# Prepare Lambda Layer directory structure
+resource "null_resource" "prepare_lambda_layer" {
+  triggers = {
+    shared_utils_hash = filemd5("${path.module}/lambda/shared_utils.py")
+  }
+
+  provisioner "local-exec" {
+    command = <<-EOT
+      mkdir -p ${path.module}/lambda_layer/python
+      cp ${path.module}/lambda/shared_utils.py ${path.module}/lambda_layer/python/
+    EOT
+  }
+}
+
+# Archive individual Lambda functions
+data "archive_file" "initiator" {
+  type        = "zip"
+  source_file = "${path.module}/lambda/initiator.py"
+  output_path = "${path.module}/.terraform/initiator.zip"
+}
+
+data "archive_file" "status_checker" {
+  type        = "zip"
+  source_file = "${path.module}/lambda/status_checker.py"
+  output_path = "${path.module}/.terraform/status_checker.zip"
+}
+
+data "archive_file" "finalizer" {
+  type        = "zip"
+  source_file = "${path.module}/lambda/finalizer.py"
+  output_path = "${path.module}/.terraform/finalizer.zip"
 }
 
 # Data sources to look up existing secrets/parameters
@@ -92,9 +129,23 @@ data "aws_ssm_parameter" "existing_client_secret" {
   )
 }
 
-# CloudWatch Log Group for Lambda
-resource "aws_cloudwatch_log_group" "lambda" {
-  name              = "/aws/lambda/${local.lambda_function_name}"
+# CloudWatch Log Groups for Lambda functions
+resource "aws_cloudwatch_log_group" "initiator" {
+  name              = "/aws/lambda/${var.name_prefix}-ami-copier-initiator"
+  retention_in_days = var.log_retention_days
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_log_group" "status_checker" {
+  name              = "/aws/lambda/${var.name_prefix}-ami-copier-status-checker"
+  retention_in_days = var.log_retention_days
+
+  tags = var.tags
+}
+
+resource "aws_cloudwatch_log_group" "finalizer" {
+  name              = "/aws/lambda/${var.name_prefix}-ami-copier-finalizer"
   retention_in_days = var.log_retention_days
 
   tags = var.tags
@@ -182,7 +233,11 @@ resource "aws_iam_role_policy" "lambda" {
           "logs:CreateLogStream",
           "logs:PutLogEvents"
         ]
-        Resource = "${aws_cloudwatch_log_group.lambda.arn}:*"
+        Resource = [
+          "${aws_cloudwatch_log_group.initiator.arn}:*",
+          "${aws_cloudwatch_log_group.status_checker.arn}:*",
+          "${aws_cloudwatch_log_group.finalizer.arn}:*"
+        ]
       },
       {
         Effect = "Allow"
@@ -221,16 +276,28 @@ resource "aws_iam_role_policy" "lambda" {
   })
 }
 
-# Lambda Function
-resource "aws_lambda_function" "ami_copier" {
-  filename         = data.archive_file.lambda.output_path
-  function_name    = local.lambda_function_name
+# Lambda Layer for shared utilities
+resource "aws_lambda_layer_version" "shared_utils" {
+  filename            = data.archive_file.lambda_layer.output_path
+  layer_name          = "${var.name_prefix}-ami-copier-shared-utils"
+  compatible_runtimes = ["python3.12"]
+  source_code_hash    = data.archive_file.lambda_layer.output_base64sha256
+
+  description = "Shared utilities for AMI copier Lambda functions"
+}
+
+# Lambda Function: Initiator
+resource "aws_lambda_function" "initiator" {
+  filename         = data.archive_file.initiator.output_path
+  function_name    = "${var.name_prefix}-ami-copier-initiator"
   role             = aws_iam_role.lambda.arn
-  handler          = "ami_copier.lambda_handler"
-  source_code_hash = data.archive_file.lambda.output_base64sha256
+  handler          = "initiator.lambda_handler"
+  source_code_hash = data.archive_file.initiator.output_base64sha256
   runtime          = "python3.12"
-  timeout          = var.lambda_timeout
+  timeout          = 600 # 10 minutes for discovery and API calls
   memory_size      = var.lambda_memory_size
+
+  layers = [aws_lambda_layer_version.shared_utils.arn]
 
   environment {
     variables = merge(
@@ -253,7 +320,61 @@ resource "aws_lambda_function" "ami_copier" {
   }
 
   depends_on = [
-    aws_cloudwatch_log_group.lambda,
+    aws_cloudwatch_log_group.initiator,
+    aws_iam_role_policy.lambda
+  ]
+
+  tags = var.tags
+}
+
+# Lambda Function: Status Checker
+resource "aws_lambda_function" "status_checker" {
+  filename         = data.archive_file.status_checker.output_path
+  function_name    = "${var.name_prefix}-ami-copier-status-checker"
+  role             = aws_iam_role.lambda.arn
+  handler          = "status_checker.lambda_handler"
+  source_code_hash = data.archive_file.status_checker.output_base64sha256
+  runtime          = "python3.12"
+  timeout          = 60 # 1 minute - just checking status
+  memory_size      = var.lambda_memory_size
+
+  layers = [aws_lambda_layer_version.shared_utils.arn]
+
+  environment {
+    variables = {
+      # Status checker doesn't need configuration, just AWS SDK access
+    }
+  }
+
+  depends_on = [
+    aws_cloudwatch_log_group.status_checker,
+    aws_iam_role_policy.lambda
+  ]
+
+  tags = var.tags
+}
+
+# Lambda Function: Finalizer
+resource "aws_lambda_function" "finalizer" {
+  filename         = data.archive_file.finalizer.output_path
+  function_name    = "${var.name_prefix}-ami-copier-finalizer"
+  role             = aws_iam_role.lambda.arn
+  handler          = "finalizer.lambda_handler"
+  source_code_hash = data.archive_file.finalizer.output_base64sha256
+  runtime          = "python3.12"
+  timeout          = 300 # 5 minutes for re-registration and tagging
+  memory_size      = var.lambda_memory_size
+
+  layers = [aws_lambda_layer_version.shared_utils.arn]
+
+  environment {
+    variables = {
+      # Finalizer receives all config in event from initiator
+    }
+  }
+
+  depends_on = [
+    aws_cloudwatch_log_group.finalizer,
     aws_iam_role_policy.lambda
   ]
 
@@ -269,20 +390,51 @@ resource "aws_cloudwatch_event_rule" "ami_discovery" {
   tags = var.tags
 }
 
-# EventBridge Target - Lambda
-resource "aws_cloudwatch_event_target" "lambda" {
+# EventBridge Target - Step Functions
+resource "aws_cloudwatch_event_target" "step_functions" {
   rule      = aws_cloudwatch_event_rule.ami_discovery.name
-  target_id = "InvokeLambda"
-  arn       = aws_lambda_function.ami_copier.arn
+  target_id = "InvokeStepFunctions"
+  arn       = aws_sfn_state_machine.ami_copier.arn
+  role_arn  = aws_iam_role.eventbridge.arn
 }
 
-# Lambda Permission for EventBridge
-resource "aws_lambda_permission" "eventbridge" {
-  statement_id  = "AllowExecutionFromEventBridge"
-  action        = "lambda:InvokeFunction"
-  function_name = aws_lambda_function.ami_copier.function_name
-  principal     = "events.amazonaws.com"
-  source_arn    = aws_cloudwatch_event_rule.ami_discovery.arn
+# IAM Role for EventBridge to invoke Step Functions
+resource "aws_iam_role" "eventbridge" {
+  name = "${var.name_prefix}-ami-copier-eventbridge"
+
+  assume_role_policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Action = "sts:AssumeRole"
+        Effect = "Allow"
+        Principal = {
+          Service = "events.amazonaws.com"
+        }
+      }
+    ]
+  })
+
+  tags = var.tags
+}
+
+# IAM Policy for EventBridge to invoke Step Functions
+resource "aws_iam_role_policy" "eventbridge" {
+  name = "${var.name_prefix}-ami-copier-eventbridge-policy"
+  role = aws_iam_role.eventbridge.id
+
+  policy = jsonencode({
+    Version = "2012-10-17"
+    Statement = [
+      {
+        Effect = "Allow"
+        Action = [
+          "states:StartExecution"
+        ]
+        Resource = aws_sfn_state_machine.ami_copier.arn
+      }
+    ]
+  })
 }
 
 # Data source for current AWS account
