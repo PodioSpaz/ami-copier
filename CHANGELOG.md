@@ -5,6 +5,13 @@ All notable changes to this project will be documented in this file.
 The format is based on [Keep a Changelog](https://keepachangelog.com/en/1.0.0/),
 and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0.html).
 
+## [1.0.1](https://github.com/PodioSpaz/ami-copier/compare/v1.0.0...v1.0.1) (2025-11-07)
+
+
+### Documentation
+
+* update README for Step Functions architecture ([#35](https://github.com/PodioSpaz/ami-copier/issues/35)) ([7d974f9](https://github.com/PodioSpaz/ami-copier/commit/7d974f953382ee459c59182f9b8673dfafceec5c))
+
 ## [1.0.0](https://github.com/PodioSpaz/ami-copier/compare/v0.3.2...v1.0.0) (2025-11-06)
 
 
