@@ -795,7 +795,3 @@ This project is licensed under the MIT License.
 ## Contributing
 
 Contributions welcome! Please open an issue or PR.
-
-## Authors
-
-Created for automating Red Hat Image Builder AMI workflows.
