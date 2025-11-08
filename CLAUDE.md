@@ -191,6 +191,7 @@ Configuration is passed to Lambda functions via environment variables:
 - `AMI_NAME_TEMPLATE` - Template string with placeholders: `{source_name}`, `{uuid}`, `{date}`, `{timestamp}`
 - `AMI_NAME_TAG_TEMPLATE` - Optional template for Name tag: `{distribution}`, `{source_name}`, `{uuid}`, `{date}`, `{timestamp}`
 - `TAGS` - JSON-encoded map of tags to apply to copied AMIs
+- `KMS_KEY_ID` - (Optional) Customer-managed KMS key ID or ARN for encryption. If not set, uses AWS-managed key (`aws/ebs`)
 - `REDHAT_CREDENTIAL_STORE` - Storage type for Red Hat API credentials ("ssm" or "secretsmanager")
 - `CLIENT_ID_PARAM` / `CLIENT_SECRET_PARAM` - SSM parameter names (if using SSM)
 - `REDHAT_SECRET_NAME` - Secrets Manager secret name (if using Secrets Manager)
@@ -210,7 +211,9 @@ The AWS `copy_image()` API does not accept the `BlockDeviceMappings` parameter. 
 
 **Step 1: Encrypted Copy** (Initiator Lambda - `initiator.py:initiate_ami_copy()`)
 - Calls `copy_image()` with `Encrypted=True` (no BlockDeviceMappings)
-- Creates encrypted snapshots with AWS-managed encryption (`aws/ebs` key)
+- Creates encrypted snapshots using either:
+  - AWS-managed encryption (`aws/ebs` key) - default
+  - Customer-managed KMS key - if `KMS_KEY_ID` environment variable is set (required for cross-account sharing)
 - Generates temporary AMI name with timestamp suffix
 - Returns temp_ami_id to Step Functions state
 
@@ -480,4 +483,35 @@ aws ec2 delete-snapshot --snapshot-id snap-xxxxx
 - **Verify authentication method in use**:
   ```bash
   aws logs tail /aws/lambda/${name_prefix}-ami-copier --follow --filter-pattern "service account"
+  ```
+
+### Custom KMS Key Issues
+
+- **KMS key permission errors**:
+  - Verify Lambda IAM role has KMS permissions: `kms:Encrypt`, `kms:Decrypt`, `kms:ReEncrypt*`, `kms:GenerateDataKey*`, `kms:CreateGrant`, `kms:DescribeKey`
+  - Check Lambda IAM policy includes the KMS key ARN in the Resource field
+  - KMS key policy must grant permissions to the Lambda execution role
+
+- **Cross-account AMI sharing not working**:
+  - Verify you're using a customer-managed KMS key (AWS-managed keys cannot be shared)
+  - Check KMS key policy grants permissions to target AWS account(s)
+  - Target account needs: `kms:Decrypt`, `kms:DescribeKey`, `kms:CreateGrant` for launching instances
+  - See [AWS Documentation: Sharing AMIs](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/sharingamis-explicit.html)
+
+- **Invalid KMS key format**:
+  - Module accepts three formats: full ARN, key ID (UUID), or alias
+  - ARN example: `arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012`
+  - Key ID example: `12345678-1234-1234-1234-123456789012`
+  - Alias example: `alias/my-ami-encryption-key`
+  - Module automatically constructs full ARN for IAM policy if key ID or alias provided
+
+- **Check KMS key usage in logs**:
+  ```bash
+  aws logs tail /aws/lambda/${name_prefix}-ami-copier-initiator --follow --filter-pattern "KMS"
+  ```
+
+- **Verify KMS key ARN in Terraform state**:
+  ```bash
+  terraform state show 'module.ami_copier.data.aws_region.current[0]'
+  terraform state show 'module.ami_copier.data.aws_caller_identity.current[0]'
   ```

@@ -7,6 +7,14 @@ locals {
   using_existing_secret = var.existing_redhat_secret_arn != "" || var.existing_redhat_secret_name != ""
   using_existing_ssm    = var.existing_redhat_client_id_param_arn != "" || var.existing_redhat_client_id_param_name != "" || var.existing_redhat_client_secret_param_arn != "" || var.existing_redhat_client_secret_param_name != ""
 
+  # Construct full KMS key ARN for IAM policy (if KMS key is specified)
+  # Handles three input formats: full ARN, key ID (UUID), or alias
+  kms_key_arn = var.kms_key_id == "" ? "" : (
+    startswith(var.kms_key_id, "arn:aws:kms:") ? var.kms_key_id :
+    startswith(var.kms_key_id, "alias/") ? "arn:aws:kms:${data.aws_region.current[0].id}:${data.aws_caller_identity.current[0].account_id}:${var.kms_key_id}" :
+    "arn:aws:kms:${data.aws_region.current[0].id}:${data.aws_caller_identity.current[0].account_id}:key/${var.kms_key_id}"
+  )
+
   # Resolve Secrets Manager secret ARN and name
   # Priority: provided value > data source lookup > created resource
   redhat_secret_arn = (
@@ -95,6 +103,15 @@ data "archive_file" "finalizer" {
   type        = "zip"
   source_file = "${path.module}/lambda/finalizer.py"
   output_path = "${path.module}/.terraform/finalizer.zip"
+}
+
+# Data sources for current AWS account and region (needed for KMS ARN construction)
+data "aws_caller_identity" "current" {
+  count = var.kms_key_id != "" ? 1 : 0
+}
+
+data "aws_region" "current" {
+  count = var.kms_key_id != "" ? 1 : 0
 }
 
 # Data sources to look up existing secrets/parameters
@@ -273,6 +290,20 @@ resource "aws_iam_role_policy" "lambda" {
           ]
           Resource = local.redhat_secret_arn
         }
+      ] : [],
+      var.kms_key_id != "" ? [
+        {
+          Effect = "Allow"
+          Action = [
+            "kms:Encrypt",
+            "kms:Decrypt",
+            "kms:ReEncrypt*",
+            "kms:GenerateDataKey*",
+            "kms:CreateGrant",
+            "kms:DescribeKey"
+          ]
+          Resource = local.kms_key_arn
+        }
     ] : [])
   })
 }
@@ -316,6 +347,9 @@ resource "aws_lambda_function" "initiator" {
       } : {},
       var.enable_redhat_api && var.redhat_credential_store == "secretsmanager" ? {
         REDHAT_SECRET_NAME = local.redhat_secret_name
+      } : {},
+      var.kms_key_id != "" ? {
+        KMS_KEY_ID = var.kms_key_id
       } : {}
     )
   }
@@ -437,6 +471,3 @@ resource "aws_iam_role_policy" "eventbridge" {
     ]
   })
 }
-
-# Data source for current AWS account
-data "aws_caller_identity" "current" {}
