@@ -10,7 +10,7 @@ Red Hat Image Builder produces AMIs with unencrypted gp2 root volumes. This modu
 2. Automatically copying new AMIs via Lambda function
 3. Copying the AMI with:
    - All volumes converted from gp2 to gp3
-   - Encryption enabled using AWS managed keys
+   - Encryption enabled using AWS managed keys (or custom KMS keys for cross-account sharing)
    - Custom naming and tagging
    - Automatic deduplication to prevent duplicate copies
 
@@ -233,6 +233,55 @@ module "rhel10_ami_copier" {
   }
 }
 ```
+
+### Custom KMS Key for Cross-Account Sharing
+
+By default, AMIs are encrypted using the AWS-managed key (`aws/ebs`), which cannot be shared across AWS accounts. To share encrypted AMIs with other accounts, you must use a customer-managed KMS key:
+
+```hcl
+module "ami_copier" {
+  source = "./ami-copier"
+
+  name_prefix       = "rhel9"
+  ami_name_template = "rhel-9-encrypted-{date}"
+
+  # Specify customer-managed KMS key (supports ARN, key ID, or alias)
+  kms_key_id = "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012"
+
+  tags = {
+    Environment = "production"
+  }
+}
+```
+
+**KMS Key Policy Requirements:**
+
+The KMS key must grant the following permissions:
+
+1. **This account (AMI copier):** `kms:Encrypt`, `kms:Decrypt`, `kms:ReEncrypt*`, `kms:GenerateDataKey*`, `kms:CreateGrant`, `kms:DescribeKey`
+2. **Target account(s):** `kms:Decrypt`, `kms:DescribeKey`, `kms:CreateGrant` (for launching EC2 instances from shared AMIs)
+
+**Example KMS key policy snippet:**
+```json
+{
+  "Sid": "Allow AMI copier account to use key",
+  "Effect": "Allow",
+  "Principal": {
+    "AWS": "arn:aws:iam::123456789012:root"
+  },
+  "Action": [
+    "kms:Encrypt",
+    "kms:Decrypt",
+    "kms:ReEncrypt*",
+    "kms:GenerateDataKey*",
+    "kms:CreateGrant",
+    "kms:DescribeKey"
+  ],
+  "Resource": "*"
+}
+```
+
+For complete KMS key policy examples, see [AWS Documentation: Sharing AMIs](https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/sharingamis-explicit.html).
 
 ### Red Hat Image Builder API Integration (Enhanced Tagging)
 
@@ -530,6 +579,10 @@ The Lambda functions require these IAM permissions:
 - `ec2:DescribeSnapshots` - Read snapshot details for re-registration
 - `logs:CreateLogGroup`, `logs:CreateLogStream`, `logs:PutLogEvents` - CloudWatch Logs
 
+When using a custom KMS key (`kms_key_id` specified):
+- `kms:Encrypt`, `kms:Decrypt`, `kms:ReEncrypt*`, `kms:GenerateDataKey*` - Encrypt/decrypt AMI snapshots
+- `kms:CreateGrant`, `kms:DescribeKey` - Grant EC2 service access to use the key
+
 The Step Functions state machine requires:
 
 - `lambda:InvokeFunction` - Invoke the three Lambda functions
@@ -592,6 +645,7 @@ Releases are fully automated:
 | status_check_wait_time | Time in seconds to wait between AMI copy status checks in Step Functions (60-3600) | number | 300 | no |
 | lambda_memory_size | Lambda memory in MB (128-10240) | number | 256 | no |
 | log_retention_days | CloudWatch Logs retention period | number | 7 | no |
+| kms_key_id | KMS key ID or ARN for encrypting AMI copies. If not specified, uses AWS-managed key (aws/ebs). Required for cross-account AMI sharing. Accepts full ARN, key ID (UUID), or alias. | string | "" | no |
 | schedule_expression | EventBridge schedule expression (e.g., 'rate(12 hours)', 'cron(0 */12 * * ? *)') | string | "rate(12 hours)" | no |
 | enable_redhat_api | Enable Red Hat Image Builder API integration for enhanced tagging | bool | false | no |
 | redhat_credential_store | Credential storage: 'ssm' (Parameter Store) or 'secretsmanager' (Secrets Manager) | string | "ssm" | no |

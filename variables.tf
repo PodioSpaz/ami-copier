@@ -80,6 +80,35 @@ variable "log_retention_days" {
   }
 }
 
+variable "kms_key_id" {
+  description = <<-EOT
+    KMS key ID or ARN to use for encrypting AMI copies.
+
+    - If not specified (default), uses AWS-managed key (aws/ebs)
+    - Required for cross-account AMI sharing (AWS-managed keys cannot be shared)
+    - Must be a customer-managed KMS key with appropriate key policy granting permissions to this account
+
+    Examples:
+    - "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012"
+    - "12345678-1234-1234-1234-123456789012"
+    - "alias/my-ami-encryption-key"
+
+    For cross-account sharing, the KMS key policy must grant the target account permission to use the key.
+  EOT
+  type        = string
+  default     = ""
+
+  validation {
+    condition = (
+      var.kms_key_id == "" ||
+      can(regex("^arn:aws:kms:[a-z0-9-]+:[0-9]{12}:key/[a-f0-9-]+$", var.kms_key_id)) ||
+      can(regex("^[a-f0-9]{8}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{4}-[a-f0-9]{12}$", var.kms_key_id)) ||
+      can(regex("^alias/.+$", var.kms_key_id))
+    )
+    error_message = "KMS key ID must be a valid ARN, key ID (UUID format), or alias (alias/...)."
+  }
+}
+
 variable "schedule_expression" {
   description = <<-EOT
     EventBridge schedule expression for automated AMI discovery.

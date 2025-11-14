@@ -56,14 +56,25 @@ def initiate_ami_copy(
         logger.info(f"Initiating encrypted copy of {source_ami_id}")
         logger.info(f"Temporary AMI name: {temp_ami_name}")
 
-        # Initiate encrypted copy (no BlockDeviceMappings parameter)
-        response = ec2_client.copy_image(
-            Name=temp_ami_name,
-            SourceImageId=source_ami_id,
-            SourceRegion=os.environ['AWS_REGION'],
-            Encrypted=True,  # Enable encryption with default AWS managed key
-            Description=f"Temporary encrypted copy of {source_image.get('Description', source_ami_id)}"
-        )
+        # Build copy_image parameters
+        copy_params = {
+            'Name': temp_ami_name,
+            'SourceImageId': source_ami_id,
+            'SourceRegion': os.environ['AWS_REGION'],
+            'Encrypted': True,
+            'Description': f"Temporary encrypted copy of {source_image.get('Description', source_ami_id)}"
+        }
+
+        # Add KMS key if specified (required for cross-account sharing)
+        kms_key_id = os.environ.get('KMS_KEY_ID', '')
+        if kms_key_id:
+            copy_params['KmsKeyId'] = kms_key_id
+            logger.info(f"Using custom KMS key for encryption: {kms_key_id}")
+        else:
+            logger.info("Using AWS-managed key (aws/ebs) for encryption")
+
+        # Initiate encrypted copy
+        response = ec2_client.copy_image(**copy_params)
 
         temp_ami_id = response['ImageId']
         logger.info(f"Copy initiated successfully: {temp_ami_id}")

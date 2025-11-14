@@ -93,6 +93,37 @@ module "rhel10_copier" {
 #   }
 # }
 
+# Example: With custom KMS key for cross-account AMI sharing
+# Use this when you need to share encrypted AMIs with other AWS accounts
+# Uncomment and configure to enable
+# module "rhel9_with_kms" {
+#   source = "../.."
+#
+#   name_prefix       = "rhel9"
+#   ami_name_template = "rhel-9-{uuid}-encrypted"
+#
+#   # Specify customer-managed KMS key for encryption
+#   # The KMS key policy must grant permissions to this account and any target accounts
+#   # You can provide: full ARN, key ID (UUID), or alias
+#   kms_key_id = "arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012"
+#   # kms_key_id = "12345678-1234-1234-1234-123456789012"  # Key ID format also works
+#   # kms_key_id = "alias/my-ami-encryption-key"           # Alias format also works
+#
+#   tags = {
+#     OS          = "RHEL"
+#     Version     = "9"
+#     Environment = "production"
+#   }
+# }
+#
+# # Example KMS key policy for cross-account sharing:
+# # The KMS key must grant the following permissions:
+# # 1. This account (AMI copier account) - encrypt, decrypt, create grants
+# # 2. Target account(s) - decrypt, describe key
+# #
+# # See AWS documentation for KMS key policy examples:
+# # https://docs.aws.amazon.com/AWSEC2/latest/UserGuide/sharingamis-explicit.html
+
 # Outputs
 output "lambda_function_arn" {
   description = "ARN of the Lambda function"

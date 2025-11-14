@@ -9,6 +9,7 @@ Tests cover:
 - AMI discovery from Red Hat account
 - Deduplication checks
 - AMI operations (block device mapping conversion, AMI copying)
+- Custom KMS key support for encryption
 - Name tag generation with template placeholders
 - Name tag graceful degradation when Distribution tag is unavailable
 - Lambda handler event processing (initiator, status_checker, finalizer)
@@ -941,6 +942,88 @@ class TestInitiatorHandler:
 
         assert result['mode'] == 'single'
         assert result['summary']['total_discovered'] == 1
+
+    def test_initiator_with_kms_key(self, aws_credentials, sample_ami_data):
+        """Test initiator uses KMS key when environment variable is set."""
+        os.environ['AMI_NAME_TEMPLATE'] = 'test-{uuid}'
+        os.environ['AMI_NAME_TAG_TEMPLATE'] = ''
+        os.environ['TAGS'] = '{}'
+        os.environ['KMS_KEY_ID'] = 'arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012'
+
+        # Prepare test data
+        sample_ami_data['Name'] = 'composer-api-a1b2c3d4-5678-90ab-cdef-1234567890ab'
+        sample_ami_data['Architecture'] = 'x86_64'
+        sample_ami_data['RootDeviceName'] = '/dev/sda1'
+        sample_ami_data['VirtualizationType'] = 'hvm'
+
+        with patch('shared_utils.ec2_client') as mock_shared_client, \
+             patch('initiator.ec2_client') as mock_initiator_client:
+            call_count = [0]
+
+            def describe_images_side_effect(*args, **kwargs):
+                call_count[0] += 1
+                if kwargs.get('Owners') == ['self']:
+                    # Deduplication - not copied
+                    return {'Images': []}
+                else:
+                    # Source AMI
+                    return {'Images': [sample_ami_data]}
+
+            mock_shared_client.describe_images.side_effect = describe_images_side_effect
+            mock_initiator_client.copy_image.return_value = {'ImageId': 'ami-temp123'}
+
+            result = initiator.lambda_handler({'source_ami_id': 'ami-12345678'}, None)
+
+        # Verify copy_image was called with KMS key
+        assert mock_initiator_client.copy_image.called
+        copy_call_kwargs = mock_initiator_client.copy_image.call_args[1]
+        assert 'KmsKeyId' in copy_call_kwargs
+        assert copy_call_kwargs['KmsKeyId'] == 'arn:aws:kms:us-east-1:123456789012:key/12345678-1234-1234-1234-123456789012'
+        assert copy_call_kwargs['Encrypted'] is True
+        assert result['mode'] == 'single'
+
+        # Clean up
+        del os.environ['KMS_KEY_ID']
+
+    def test_initiator_without_kms_key(self, aws_credentials, sample_ami_data):
+        """Test initiator uses AWS-managed key when KMS_KEY_ID is not set (backward compatibility)."""
+        os.environ['AMI_NAME_TEMPLATE'] = 'test-{uuid}'
+        os.environ['AMI_NAME_TAG_TEMPLATE'] = ''
+        os.environ['TAGS'] = '{}'
+        # Ensure KMS_KEY_ID is not set
+        if 'KMS_KEY_ID' in os.environ:
+            del os.environ['KMS_KEY_ID']
+
+        # Prepare test data
+        sample_ami_data['Name'] = 'composer-api-a1b2c3d4-5678-90ab-cdef-1234567890ab'
+        sample_ami_data['Architecture'] = 'x86_64'
+        sample_ami_data['RootDeviceName'] = '/dev/sda1'
+        sample_ami_data['VirtualizationType'] = 'hvm'
+
+        with patch('shared_utils.ec2_client') as mock_shared_client, \
+             patch('initiator.ec2_client') as mock_initiator_client:
+            call_count = [0]
+
+            def describe_images_side_effect(*args, **kwargs):
+                call_count[0] += 1
+                if kwargs.get('Owners') == ['self']:
+                    # Deduplication - not copied
+                    return {'Images': []}
+                else:
+                    # Source AMI
+                    return {'Images': [sample_ami_data]}
+
+            mock_shared_client.describe_images.side_effect = describe_images_side_effect
+            mock_initiator_client.copy_image.return_value = {'ImageId': 'ami-temp123'}
+
+            result = initiator.lambda_handler({'source_ami_id': 'ami-12345678'}, None)
+
+        # Verify copy_image was called WITHOUT KMS key (backward compatibility)
+        assert mock_initiator_client.copy_image.called
+        copy_call_kwargs = mock_initiator_client.copy_image.call_args[1]
+        assert 'KmsKeyId' not in copy_call_kwargs
+        assert copy_call_kwargs['Encrypted'] is True
+        assert result['mode'] == 'single'
 
 
 class TestStatusCheckerHandler:
