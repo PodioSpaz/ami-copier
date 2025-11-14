@@ -169,6 +169,20 @@ To prevent copying the same AMI multiple times (performed in Initiator Lambda):
 
 Using tag-based deduplication (instead of name matching) is robust against timestamp variations in AMI names.
 
+### Lambda Layer Module Version Detection
+
+The Lambda Layer (`shared_utils.py`) is packaged using a `null_resource` that automatically recreates the layer directory structure when needed (`main.tf:67-78`). The resource uses two triggers to detect when recreation is necessary:
+
+1. **Content Changes** - `filemd5("${path.module}/lambda/shared_utils.py")` detects modifications to the shared utilities code
+2. **Module Version Changes** - `path.module` detects when the module source or version changes (e.g., switching from `v1.0.0` to `v1.1.0`)
+
+This ensures the `lambda_layer/python/` directory is automatically recreated when:
+- Switching between module versions (releases, branches, or commits)
+- Upgrading or downgrading the module
+- The module is freshly downloaded by Terraform
+
+No manual intervention (e.g., `terraform apply -replace`) is required when changing module versions.
+
 ### Lambda Environment Variables
 
 Configuration is passed to Lambda functions via environment variables:

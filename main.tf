@@ -67,6 +67,7 @@ data "archive_file" "lambda_layer" {
 resource "null_resource" "prepare_lambda_layer" {
   triggers = {
     shared_utils_hash = filemd5("${path.module}/lambda/shared_utils.py")
+    module_path       = path.module
   }
 
   provisioner "local-exec" {
